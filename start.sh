@@ -6,14 +6,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Same PATH guard as setup.sh -- see comment there. Without this the
+# Docker credential helper can't be found, and any compose commands
+# that trigger image pulls or logins fail mysteriously.
+export PATH="/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
+
 printf "\n"
 printf "============================================================\n"
 printf " Flow BOF Automation -- start (macOS)\n"
 printf "============================================================\n\n"
 
-# 1. Make sure Docker is installed AND ready. Same helper used by
-#    setup.sh -- detects CLI, opens Docker Desktop if needed, waits
-#    up to 180s for the daemon. Sets $DOCKER_BIN on success.
+# 1. Make sure Docker is ready.
 # shellcheck disable=SC1091
 source "scripts/_mac_docker_ready.sh"
 ensure_docker_ready
@@ -33,15 +36,26 @@ else
     echo "       Fix with: chmod +x scripts/start_chrome_debug.sh" >&2
 fi
 
-# 3. Docker services. Only bring up what the user needs (cdp-proxy + ui);
-#    the app service is on-demand via 'docker compose run --rm app ...'.
+# 3. Docker services. Only bring up what the user needs (cdp-proxy + ui).
 echo "Starting Docker services (cdp-proxy + ui)..."
-"${DOCKER_BIN}" compose up -d cdp-proxy ui
+if ! docker compose up -d cdp-proxy ui; then
+    cat >&2 <<'ERR'
 
-# 4. Wait for the UI to respond on :8080.
-echo "Waiting for UI..."
+[FAIL] docker compose up failed. Inspect the most recent attempt:
+        docker compose ps
+        docker compose logs ui --tail=100
+ERR
+    exit 1
+fi
+
+# 4. Wait for the UI to actually respond on :8080 -- up to 60s. We do
+#    NOT report success based on the compose command alone; the
+#    container can be "up" while Streamlit is still importing modules,
+#    and the user sees "localhost refused" if they open the browser
+#    too soon.
+echo "Waiting for UI on http://localhost:8080 (up to 60s)..."
 ready=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
     if curl -fsS -o /dev/null --max-time 1 "http://localhost:8080" 2>/dev/null; then
         ready=1
         break
@@ -50,12 +64,33 @@ for _ in $(seq 1 30); do
 done
 
 if [[ "$ready" -eq 0 ]]; then
-    echo "[WARN] UI didn't respond at http://localhost:8080 within 30s."
-    echo "       Check '${DOCKER_BIN} compose logs ui'. The browser will"
-    echo "       still open; refresh once the container is up."
-else
-    echo "[OK] UI is up."
+    cat >&2 <<'ERR'
+
+[FAIL] UI did not respond at http://localhost:8080 within 60s.
+       Diagnostic dump follows -- share this with support if needed.
+ERR
+    echo "" >&2
+    echo "--- docker compose ps ---" >&2
+    docker compose ps >&2 || true
+    echo "" >&2
+    echo "--- docker compose logs ui --tail=100 ---" >&2
+    docker compose logs ui --tail=100 >&2 || true
+    echo "" >&2
+    cat >&2 <<'ERR'
+
+Common causes:
+  - Streamlit crashed on import. Check the log block above for a
+    Python traceback.
+  - Port 8080 is occupied by another process. Stop that process and
+    rerun ./start.sh.
+  - The image was never built. Run ./setup.sh first.
+
+Once you've fixed the issue, rerun ./start.sh.
+ERR
+    exit 1
 fi
+
+echo "[OK] UI is up at http://localhost:8080."
 
 # 5. Open the UI in the default browser.
 open "http://localhost:8080" 2>/dev/null || true

@@ -1,25 +1,30 @@
 # Shared Docker-readiness helper for macOS. SOURCE this file from
-# setup.sh / start.sh -- it's not meant to be executed directly.
+# setup.sh / start.sh / stop.sh -- it's not meant to be executed directly.
 #
 # Provides:
-#   $DOCKER_BIN              -- resolved path to the docker CLI
 #   ensure_docker_ready      -- locate Docker, open Docker Desktop if
 #                               needed, wait up to 180s for the daemon.
 #                               Exits the calling script on hard failure.
+#   _find_docker_cli         -- internal; sets DOCKER_BIN if docker is
+#                               on PATH. stop.sh uses it directly to
+#                               avoid blocking on a dead daemon.
 #
-# Why a helper: brand-new Mac users often install Docker Desktop, never
-# open it, then run ./setup.sh and see "Docker not installed" -- because
-# the docker CLI lives inside Docker.app's bundle until Docker Desktop
-# has been launched at least once and added itself to PATH. The logic
-# below distinguishes "Docker.app missing" (really not installed) from
-# "CLI not yet on PATH" (installed, just dormant), and starts the app
-# automatically.
+# The PATH export below is the load-bearing line: Docker Desktop's
+# credential helper (docker-credential-desktop) lives in the same bin
+# dir as the docker CLI, and `docker compose build` shells out to it.
+# If that bin dir isn't on PATH, builds fail with:
+#   docker-credential-desktop: executable file not found in $PATH
+# Putting Docker.app's bin first guarantees both the CLI and the
+# credential helper resolve, regardless of which shell the user is
+# running and whether Docker Desktop has run its first-launch PATH
+# install step yet.
+export PATH="/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 
-# Resolve a usable docker CLI into DOCKER_BIN. Tries:
-#   1. docker on PATH                       (post-first-launch state)
-#   2. Docker.app's bundled binary          (just-installed state)
-#   3. /usr/local/bin/docker                (Intel Macs; symlink target)
-# Returns 0 on success, 1 on failure. Sets DOCKER_BIN if found.
+
+# Resolve a usable docker CLI. With the PATH export above, this should
+# almost always hit on `command -v docker`. The /Applications/... and
+# /usr/local/bin fallbacks are belt-and-suspenders for weird PATH
+# clobbering in user dotfiles.
 _find_docker_cli() {
     if command -v docker >/dev/null 2>&1; then
         DOCKER_BIN="$(command -v docker)"
@@ -36,12 +41,10 @@ _find_docker_cli() {
     return 1
 }
 
-# Is Docker Desktop installed (regardless of whether the CLI is on PATH)?
 _docker_desktop_installed() {
     [[ -d "/Applications/Docker.app" ]]
 }
 
-# Try to launch Docker Desktop. Does not wait.
 _launch_docker_desktop() {
     if command -v open >/dev/null 2>&1; then
         open -a Docker >/dev/null 2>&1 || true
@@ -49,14 +52,13 @@ _launch_docker_desktop() {
 }
 
 # Block up to 180s (36 iterations × 5s) waiting for `docker info` to
-# succeed. Prints a progress dot every iteration so the user knows it's
-# alive. Returns 0 on success, 1 on timeout.
+# succeed. Returns 0 on success, 1 on timeout.
 _wait_for_docker_daemon() {
     local max_iter=36   # 36 * 5s = 180s
     local i=0
     printf "Waiting for Docker Desktop to start"
     while (( i < max_iter )); do
-        if "${DOCKER_BIN}" info >/dev/null 2>&1; then
+        if docker info >/dev/null 2>&1; then
             printf " ready.\n"
             return 0
         fi
@@ -69,15 +71,11 @@ _wait_for_docker_daemon() {
 }
 
 # Top-level: ensure Docker is fully ready or exit the calling script.
-# On success, $DOCKER_BIN points at a working docker CLI and the daemon
-# is responsive. On failure, prints a clear next-step instruction and
-# exits 1 from the calling script.
 ensure_docker_ready() {
-    # Step 1: do we have a docker CLI at all?
+    # Step 1: do we have a docker CLI on PATH (post-export)?
     if _find_docker_cli; then
-        # CLI found. Maybe daemon is already running -- short-circuit.
-        if "${DOCKER_BIN}" info >/dev/null 2>&1; then
-            echo "[OK] Docker Desktop is running. (docker: ${DOCKER_BIN})"
+        if docker info >/dev/null 2>&1; then
+            echo "[OK] Docker Desktop is running."
             return 0
         fi
         # CLI works but daemon isn't responding. Likely Docker Desktop
@@ -87,21 +85,17 @@ ensure_docker_ready() {
             echo "Opening Docker Desktop..."
             _launch_docker_desktop
             if _wait_for_docker_daemon; then
-                echo "[OK] Docker Desktop is running. (docker: ${DOCKER_BIN})"
+                echo "[OK] Docker Desktop is running."
                 return 0
             fi
             cat >&2 <<'ERR'
 [FAIL] Docker Desktop is installed but did not become ready within 180s.
        Open Docker Desktop manually from /Applications, wait until the
-       menu-bar whale icon says "Docker is running", then rerun:
-
-           ./setup.sh   (or ./start.sh)
-
+       menu-bar whale icon says "Docker is running", then rerun the
+       script (./setup.sh or ./start.sh).
 ERR
             exit 1
         fi
-        # CLI exists but Docker.app doesn't -- weird state (CLI-only
-        # install, Colima, etc.). Tell the user to start their daemon.
         cat >&2 <<'ERR'
 [FAIL] Docker CLI is installed but the daemon isn't responding, and
        Docker Desktop isn't in /Applications. If you're using Colima or
@@ -110,15 +104,16 @@ ERR
         exit 1
     fi
 
-    # Step 2: no CLI on PATH. Is Docker Desktop installed?
+    # Step 2: no CLI on PATH (even after our export). Is Docker.app there?
     if _docker_desktop_installed; then
         echo "Docker Desktop is installed, but the docker command is not available yet."
         echo "Opening Docker Desktop..."
         _launch_docker_desktop
-        # Try again after a brief settle -- Docker Desktop adds its CLI
-        # symlink to /usr/local/bin on first launch.
+        # Re-probe after a brief settle. Docker Desktop installs its
+        # CLI symlink to /usr/local/bin (which our PATH already covers)
+        # on first launch.
         local tries=0
-        while (( tries < 24 )); do   # 24 * 5s = 120s for the symlink
+        while (( tries < 24 )); do   # 24 * 5s = 120s
             if _find_docker_cli; then
                 break
             fi
@@ -132,16 +127,12 @@ ERR
 [FAIL] Docker Desktop is installed but the docker command never appeared
        on PATH. Open Docker Desktop manually from /Applications, complete
        its first-run setup (it may ask for your password to install the
-       CLI helper), then rerun:
-
-           ./setup.sh   (or ./start.sh)
-
+       CLI helper), then rerun the script.
 ERR
             exit 1
         fi
-        # CLI is now resolvable -- wait for the daemon.
         if _wait_for_docker_daemon; then
-            echo "[OK] Docker Desktop is running. (docker: ${DOCKER_BIN})"
+            echo "[OK] Docker Desktop is running."
             return 0
         fi
         cat >&2 <<'ERR'
@@ -152,8 +143,7 @@ ERR
         exit 1
     fi
 
-    # Step 3: neither CLI nor Docker.app. This is the only true
-    # "Docker is not installed" path.
+    # Step 3: neither CLI nor Docker.app. The only true "not installed".
     cat >&2 <<'ERR'
 [FAIL] Docker Desktop is not installed on this Mac.
        Install Docker Desktop for Mac:

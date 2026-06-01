@@ -5,9 +5,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Resolve docker CLI even if Docker Desktop hasn't put it on PATH yet.
-# We DON'T wait for the daemon here -- if the daemon is already down,
-# `compose down` is effectively a no-op and we want that to be fast.
+# Same PATH guard as setup.sh / start.sh.
+export PATH="/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
+
+# Resolve docker CLI even if Docker Desktop hasn't fully run its
+# first-launch PATH install. We DON'T wait for the daemon here -- if
+# the daemon is already down, `compose down` is a no-op and we want
+# that to be fast.
 # shellcheck disable=SC1091
 source "scripts/_mac_docker_ready.sh"
 if ! _find_docker_cli; then
@@ -18,18 +22,15 @@ if ! _find_docker_cli; then
 fi
 
 printf "\nStopping Docker services...\n"
-if ! "${DOCKER_BIN}" compose down --remove-orphans; then
+if ! docker compose down --remove-orphans; then
     echo "[WARN] docker compose down exited non-zero." >&2
 fi
 
-# Offer to close Chrome. On macOS we ask first because users often
-# keep other Chrome windows open they don't want killed.
+# Offer to close Chrome.
 printf "\nClose all Chrome windows too? (y/N) "
 read -r reply
 case "$reply" in
     y|Y|yes|YES)
-        # AppleScript is the polite way: it asks Chrome to quit, lets it
-        # save state, and won't kill unrelated processes.
         if command -v osascript >/dev/null 2>&1; then
             osascript -e 'tell application "Google Chrome" to quit' 2>/dev/null || true
             echo "[OK] Asked Chrome to quit."
