@@ -33,7 +33,7 @@ Everything is free except your AI API key.
 
 | What                   | Why                              | Get it                                                              |
 | ---------------------- | -------------------------------- | ------------------------------------------------------------------- |
-| Windows 10/11          | The lifecycle scripts are PowerShell. | (you already have it) |
+| Windows 10/11 **or** macOS | Both supported (PowerShell on Windows, shell scripts on Mac). | (you already have one) |
 | Docker Desktop         | Runs the UI + automation.        | <https://www.docker.com/products/docker-desktop/>                   |
 | Google Chrome          | The browser Flow runs in.        | <https://www.google.com/chrome/>                                    |
 | Google account         | To log into Flow Labs.           | <https://labs.google/flow>                                          |
@@ -53,27 +53,43 @@ host. Everything runs in Docker.
 
 ## Install
 
-1. **Install Docker Desktop** and start it. Wait for the whale icon in the
-   system tray to stop animating.
+1. **Install Docker Desktop** and start it. Wait for the whale icon to
+   stop animating (system tray on Windows, menu bar on Mac).
 2. **Install Google Chrome** if you don't have it.
-3. **Unzip this folder** somewhere (e.g. `C:\Tools\flow-bof-automation`).
-4. **Open PowerShell in that folder.** (Shift-right-click the folder → "Open
-   PowerShell window here".)
-5. Run:
+3. **Unzip this folder** somewhere.
 
-   ```powershell
-   .\setup.ps1
-   ```
+### Windows
 
-   This builds the Docker images, creates the project folders, and writes a
-   default `.env`. Safe to re-run anytime.
+```powershell
+# Open PowerShell in the unzipped folder (Shift-right-click → "Open
+# PowerShell window here") and run:
+.\setup.ps1
+```
+
+### macOS
+
+```bash
+# Open Terminal in the unzipped folder and run:
+chmod +x setup.sh start.sh stop.sh scripts/start_chrome_debug.sh
+./setup.sh
+```
+
+`setup` builds the Docker images, creates the project folders, and writes
+a default `.env`. Safe to re-run anytime. See [docs/MAC_SETUP.md](docs/MAC_SETUP.md)
+for the Mac-specific walkthrough.
 
 ---
 
 ## Run
 
+Windows:
 ```powershell
 .\start.ps1
+```
+
+macOS:
+```bash
+./start.sh
 ```
 
 This launches three things:
@@ -150,18 +166,30 @@ image manually on each card.
 
 ## Daily operation
 
+Windows:
 ```powershell
 .\start.ps1   # in the morning, or whenever you want to work
 .\stop.ps1    # when you're done (data + settings preserved)
 .\reset.ps1   # clear runtime state, keep batches + settings
 ```
 
-| Script        | What it does                                                          |
-| ------------- | --------------------------------------------------------------------- |
-| `setup.ps1`   | Build images, create folders, bootstrap `.env`. Re-run any time.      |
-| `start.ps1`   | Launch Chrome (debug) + Docker services + open the UI.                |
-| `stop.ps1`    | `docker compose down`. Asks before closing Chrome. Preserves all data. |
-| `reset.ps1`   | Confirmed wipe of run state. **Keeps** batches, settings, API keys.   |
+macOS:
+```bash
+./start.sh
+./stop.sh
+# (reset is Windows-only at the moment; remove the same files by hand if
+# you need a runtime-state wipe on Mac:
+#   rm -rf outputs/logs/* inputs/products.csv inputs/prompt_manifest.md \
+#          data/unmatched_favorites.json
+# )
+```
+
+| Script                   | What it does                                                          |
+| ------------------------ | --------------------------------------------------------------------- |
+| `setup.ps1` / `setup.sh` | Build images, create folders, bootstrap `.env`. Re-run any time.      |
+| `start.ps1` / `start.sh` | Launch Chrome (debug) + Docker services + open the UI.                |
+| `stop.ps1` / `stop.sh`   | `docker compose down`. Asks before closing Chrome. Preserves all data. |
+| `reset.ps1` (Windows)    | Confirmed wipe of run state. **Keeps** batches, settings, API keys.   |
 
 ---
 
@@ -213,10 +241,12 @@ flow-bof-automation/
 ├── scripts/                    ← Chrome launcher, alpha packager
 ├── docs/
 │   ├── QUICKSTART.md           ← first-batch walkthrough
+│   ├── MAC_SETUP.md            ← macOS-specific install + commands
 │   ├── API_KEYS.md             ← API keys + storage + rotation
 │   ├── TROUBLESHOOTING.md      ← every alpha pitfall, indexed
 │   ├── DISTRIBUTION.md         ← packaging the alpha ZIP
-│   └── DOCKER_SETUP.md         ← what the containers do
+│   ├── DOCKER_SETUP.md         ← what the containers do
+│   └── GITHUB_RELEASE_CHECKLIST.md ← pre-push hygiene
 ├── data/
 │   ├── batches/<batch_id>/     ← your products + prompts
 │   ├── settings.local.json     ← AI provider, model, blanket prompt

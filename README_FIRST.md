@@ -9,19 +9,38 @@ Wait until the whale icon in the Windows tray is steady (not animated).
 
 ## 2. Run setup
 
+### Windows
+
 Open PowerShell in this folder (the one containing this README) and run:
 
 ```powershell
 .\setup.ps1
 ```
 
-It builds the Docker images, creates the project folders, and bootstraps a
-`.env` file. Safe to re-run.
+### macOS
+
+Open Terminal in this folder and run:
+
+```bash
+chmod +x setup.sh start.sh stop.sh scripts/start_chrome_debug.sh
+./setup.sh
+```
+
+(See [docs/MAC_SETUP.md](docs/MAC_SETUP.md) for the full Mac walkthrough.)
+
+Either path builds the Docker images, creates the project folders, and
+bootstraps a `.env` file. Safe to re-run.
 
 ## 3. Start the app
 
+Windows:
 ```powershell
 .\start.ps1
+```
+
+macOS:
+```bash
+./start.sh
 ```
 
 This launches:
@@ -54,8 +73,14 @@ For more detail see [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ## Stopping
 
+Windows:
 ```powershell
 .\stop.ps1
+```
+
+macOS:
+```bash
+./stop.sh
 ```
 
 Your data, settings, and API keys are preserved. Run `.\start.ps1` to resume.

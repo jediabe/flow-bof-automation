@@ -35,3 +35,13 @@ Kalodata_Product_*.xlsx
 
 # Alpha distribution ZIPs
 dist/
+
+# macOS noise files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows noise files
+Thumbs.db
+Desktop.ini

@@ -41,7 +41,14 @@ $includeFiles = @(
     "setup.ps1",
     "start.ps1",
     "stop.ps1",
-    "reset.ps1"
+    "reset.ps1",
+    # macOS lifecycle scripts — shipped alongside the .ps1 versions so a
+    # single ZIP works on both platforms. The .sh executable bits need
+    # to be re-set by the Mac tester (the ZIP format loses them on some
+    # extraction tools), which is exactly what setup.sh does.
+    "setup.sh",
+    "start.sh",
+    "stop.sh"
 )
 foreach ($f in $includeFiles) {
     if (Test-Path $f) {

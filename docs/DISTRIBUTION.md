@@ -29,7 +29,8 @@ README.md
 requirements.txt
 main.py
 streamlit_app.py
-setup.ps1 / start.ps1 / stop.ps1 / reset.ps1
+setup.ps1 / start.ps1 / stop.ps1 / reset.ps1  ← Windows
+setup.sh  / start.sh  / stop.sh               ← macOS
 src/      ← all Python source
 ai/       ← provider plugins
 scripts/  ← chrome launcher, package_alpha.ps1 itself, etc.
