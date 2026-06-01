@@ -3283,19 +3283,57 @@ def page_bof_batch_builder() -> None:
         step=1,
         key="bof_vid_limit",
     )
+
+    # Counters now describe the favorited-tile world, not CSV rows. We
+    # can know how many media_ids have ALREADY been submitted (state
+    # file) but the count of "ready to submit" requires an actual Flow
+    # scan, which is too expensive to do on every UI render. So we show
+    # a deferred "ready" count that the user can refresh on demand.
+    from src.video_state import load_submitted_media_ids
+    submitted_ids = load_submitted_media_ids()
+    ready_count = st.session_state.get("bof_vid_ready_count")
     csv_total, csv_counts = csv_status_counts()
-    if csv_total > 0:
-        st.caption(
-            f"Approved (ready for video): {csv_counts.get(STATUS_IMAGE_APPROVED, 0)} · "
-            f"video submitted: {csv_counts.get(STATUS_VIDEO_SUBMITTED, 0)} · "
-            f"video errors: {csv_counts.get('video_error', 0)}."
+    vid_errors = csv_counts.get("video_error", 0)
+
+    rc_str = "(click 'Scan favorites' to refresh)" if ready_count is None else str(ready_count)
+    st.caption(
+        f"Favorited images ready for video: **{rc_str}** · "
+        f"Videos submitted: **{len(submitted_ids)}** · "
+        f"Video errors: **{vid_errors}**"
+    )
+
+    include_already = st.checkbox(
+        "Include already submitted favorited images",
+        value=False,
+        key="bof_vid_include_already",
+        help=(
+            "By default the app skips media_ids it already animated in a "
+            "previous run (tracked in data/video_submitted_tiles.json). "
+            "Tick this to re-submit them anyway."
+        ),
+    )
+
+    vc1, vc2 = st.columns([1, 2])
+    if vc1.button("Scan favorites", key="bof_vid_scan", help=(
+        "Open Flow and count the favorited image tiles you currently "
+        "have. Use this if you want a count before you click Generate."
+    )):
+        run_cli(["--list-unmatched-favorites"])
+        st.info(
+            "Scan command launched. Look at the log block above for the "
+            "favorited tile list. The exact count of *new* tiles to "
+            "submit will print at the top of the next Generate run too."
         )
-    if st.button(
+
+    btn_args = ["--generate-videos", "--limit", str(int(vid_limit))]
+    if include_already:
+        btn_args.append("--include-already-submitted")
+    if vc2.button(
         f"Generate Videos for Favorited Images (up to {vid_limit})",
         type="primary",
         key="bof_gen_videos",
     ):
-        run_cli(["--generate-videos", "--limit", str(int(vid_limit))])
+        run_cli(btn_args)
 
     # =====================================================================
     # Advanced — collapsed by default
@@ -3331,6 +3369,22 @@ def page_bof_batch_builder() -> None:
             run_cli(["--sync-favorites"])
         if a7.button("Generate Videos Only", key="bof_adv_genvid"):
             run_cli(["--generate-videos", "--limit", str(int(vid_limit))])
+        st.markdown("**Legacy video paths**")
+        st.caption(
+            "The main button above iterates favorited Flow tiles "
+            "directly (no CSV binding required). The button below "
+            "iterates CSV rows that hit status=image_approved + have a "
+            "media_id — useful if you want product binding to drive "
+            "video submission instead of ❤️ state."
+        )
+        if st.button(
+            "Generate Videos from Approved Product Rows",
+            key="bof_adv_genvid_rows",
+        ):
+            run_cli([
+                "--generate-videos-from-approved-rows",
+                "--limit", str(int(vid_limit)),
+            ])
         st.markdown("**Debug**")
         st.caption(
             "Open the **Logs** entry in the sidebar's Advanced section "

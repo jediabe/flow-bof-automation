@@ -50,6 +50,8 @@ class UserSettings:
     # env / hard-coded default" — see config.DEFAULT_BLANKET_VIDEO_PROMPT.
     use_blanket_video_prompt: str = ""  # "" / "true" / "false"
     blanket_video_prompt: str = ""
+    # "favorited_tiles" or "approved_rows". Empty falls back to env / default.
+    video_source_mode: str = ""
 
 
 @dataclass
@@ -70,6 +72,7 @@ _SETTINGS_TO_ENV = {
     "openrouter_app_name":     "OPENROUTER_APP_NAME",
     "use_blanket_video_prompt":"USE_BLANKET_VIDEO_PROMPT",
     "blanket_video_prompt":    "BLANKET_VIDEO_PROMPT",
+    "video_source_mode":       "VIDEO_SOURCE_MODE",
 }
 _SECRETS_TO_ENV = {
     "openai_api_key":      "OPENAI_API_KEY",

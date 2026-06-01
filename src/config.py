@@ -69,6 +69,21 @@ class Settings:
     # Phase 5.1 — strict blanket video prompt. See docs/UI_GUIDE.md.
     use_blanket_video_prompt: bool
     blanket_video_prompt: str
+    # Phase 5.2 — what does --generate-videos iterate over by default?
+    # "favorited_tiles" (default): scan Flow for hearted image tiles,
+    #     animate every one of them with the blanket prompt. No CSV
+    #     binding required.
+    # "approved_rows": legacy path — iterate CSV rows that are
+    #     image_approved + have a media_id. Kept for advanced use.
+    video_source_mode: str
+
+
+VIDEO_SOURCE_MODE_FAVORITED_TILES = "favorited_tiles"
+VIDEO_SOURCE_MODE_APPROVED_ROWS = "approved_rows"
+VALID_VIDEO_SOURCE_MODES = {
+    VIDEO_SOURCE_MODE_FAVORITED_TILES,
+    VIDEO_SOURCE_MODE_APPROVED_ROWS,
+}
 
 
 DEFAULT_BLANKET_VIDEO_PROMPT = (
@@ -197,6 +212,14 @@ def load_settings() -> Settings:
         blanket_video_prompt=(
             os.getenv("BLANKET_VIDEO_PROMPT") or DEFAULT_BLANKET_VIDEO_PROMPT
         ).strip(),
+        video_source_mode=(
+            (os.getenv("VIDEO_SOURCE_MODE") or VIDEO_SOURCE_MODE_FAVORITED_TILES)
+            .strip()
+            .lower()
+            if (os.getenv("VIDEO_SOURCE_MODE") or "").strip().lower()
+            in VALID_VIDEO_SOURCE_MODES
+            else VIDEO_SOURCE_MODE_FAVORITED_TILES
+        ),
     )
 
 

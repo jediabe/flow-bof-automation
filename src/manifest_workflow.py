@@ -671,6 +671,175 @@ def run_generate_videos_from_manifest(
     return 1 if failures else 0
 
 
+def run_generate_videos_from_favorited_tiles(
+    settings: Settings,
+    logger: logging.Logger,
+    limit: int | None = None,
+    *,
+    include_already_submitted: bool = False,
+) -> int:
+    """Animate every favorited image tile currently visible in Flow.
+
+    This is the default code path for ``--generate-videos``. It does
+    NOT require:
+      - a row in products.csv,
+      - status=image_approved,
+      - a product-bound video_prompt,
+      - unmatched-favorite binding.
+
+    Behavior:
+      1. Open Flow.
+      2. Scan tiles, filter to favorited image tiles (skip video tiles
+         and non-favorited tiles).
+      3. De-dup by media_id.
+      4. Skip media_ids previously submitted (per
+         data/video_submitted_tiles.json) unless
+         ``include_already_submitted`` is True.
+      5. For each, animate with the blanket video prompt.
+
+    Always uses the blanket prompt — the universal-prompt rule
+    applies here too. The per-row video_prompt is irrelevant in this
+    mode (there might not even be a row).
+    """
+    from .flow_tiles import scan_tiles
+    from .video_state import load_submitted_media_ids, mark_submitted
+
+    blanket = settings.blanket_video_prompt.strip()
+    if not blanket:
+        logger.error("BLANKET_VIDEO_PROMPT is empty — refusing to submit.")
+        return 1
+
+    import time
+    batch_started = time.monotonic()
+    successes = 0
+    failures = 0
+    skipped = 0
+    per_tile_seconds: list[float] = []
+
+    already = set() if include_already_submitted else load_submitted_media_ids()
+    if include_already_submitted:
+        logger.info("Include-already-submitted mode: ignoring prior submission history.")
+
+    with open_flow_browser(settings, logger) as session:
+        page = acquire_flow_page(session, settings, logger)
+
+        tiles = scan_tiles(page, logger=logger)
+        favorited = [
+            t for t in tiles
+            if t.favorited and t.flow_media_id and t.kind in {"image", ""}
+        ]
+        # De-dup by media_id; Flow's grid occasionally renders the same
+        # tile twice (drag wrapper + inner card), and `scan_tiles`
+        # already dedupes by tile_id, but media_id is the true key for
+        # video submission so we apply a second dedupe pass here too.
+        seen_media_ids: set[str] = set()
+        ordered: list = []
+        for t in favorited:
+            if t.flow_media_id in seen_media_ids:
+                continue
+            seen_media_ids.add(t.flow_media_id)
+            ordered.append(t)
+
+        logger.info(
+            "Scanned %d tile(s); %d favorited image tile(s) eligible.",
+            len(tiles), len(ordered),
+        )
+
+        # Filter out the previously-submitted ones.
+        to_submit = []
+        for t in ordered:
+            if t.flow_media_id in already:
+                skipped += 1
+                logger.info(
+                    "Skipping media_id=%s (already submitted in a prior run).",
+                    t.flow_media_id,
+                )
+                continue
+            to_submit.append(t)
+
+        if not to_submit:
+            logger.info(
+                "Nothing to submit — %d favorited tile(s) found, %d already submitted.",
+                len(ordered), skipped,
+            )
+            return 0
+
+        if limit is not None:
+            to_submit = to_submit[:limit]
+
+        logger.info(
+            "Animating %d favorited tile(s) (mode=%s, retries=%d).",
+            len(to_submit), settings.automation_mode, settings.video_retry_count,
+        )
+
+        for n, tile in enumerate(to_submit, start=1):
+            tile_started = time.monotonic()
+            logger.info(
+                "--- [%d/%d] media_id=%s tile_id=%s edit_id=%s",
+                n, len(to_submit), tile.flow_media_id,
+                tile.flow_tile_id or "-", tile.edit_id or "-",
+            )
+            logger.info("Using blanket video prompt for media_id=%s", tile.flow_media_id)
+
+            try:
+                perform_recorded_video_flow(
+                    page,
+                    tile.flow_media_id,
+                    blanket,
+                    logger=logger,
+                    selector_timeout_ms=settings.selector_timeout_ms,
+                    tile_settle_ms=settings.video_tile_settle_ms,
+                    after_hover_ms=settings.video_after_hover_ms,
+                    after_menu_click_ms=settings.video_after_menu_click_ms,
+                    retry_count=settings.video_retry_count,
+                    logs_dir=settings.logs_dir,
+                    debug_screenshots=settings.debug_screenshots,
+                )
+            except RecordedFlowError as exc:
+                failures += 1
+                logger.error(
+                    "Video failed for media_id=%s: %s — continuing batch.",
+                    tile.flow_media_id, exc,
+                )
+                page.wait_for_timeout(settings.video_between_products_ms)
+                continue
+            except FlowAutomationError as exc:
+                failures += 1
+                logger.error(
+                    "Flow error for media_id=%s: %s — continuing batch.",
+                    tile.flow_media_id, exc,
+                )
+                page.wait_for_timeout(settings.video_between_products_ms)
+                continue
+            except Exception:  # noqa: BLE001
+                failures += 1
+                logger.exception(
+                    "Unexpected error for media_id=%s — continuing batch.",
+                    tile.flow_media_id,
+                )
+                page.wait_for_timeout(settings.video_between_products_ms)
+                continue
+
+            successes += 1
+            mark_submitted(tile.flow_media_id)
+            elapsed = time.monotonic() - tile_started
+            per_tile_seconds.append(elapsed)
+            logger.info(
+                "Video submitted for media_id=%s (took %.1fs)",
+                tile.flow_media_id, elapsed,
+            )
+            page.wait_for_timeout(settings.video_between_products_ms)
+
+    total_elapsed = time.monotonic() - batch_started
+    avg = sum(per_tile_seconds) / len(per_tile_seconds) if per_tile_seconds else 0.0
+    logger.info(
+        "Favorited-tile video batch done in %.1fs — %d submitted, "
+        "%d failed, %d skipped, avg %.1fs/tile.",
+        total_elapsed, successes, failures, skipped, avg,
+    )
+    return 1 if failures else 0
+
+
 def _append_video_note(existing: str, new: str) -> str:
     return new if not existing else f"{existing} | {new}"
 

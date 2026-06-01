@@ -18,6 +18,7 @@ from src.csv_workflow import (
 from src.flow_automation import run_check_browser, run_setup_browser
 from src.manifest_workflow import (
     run_generate_images_from_manifest,
+    run_generate_videos_from_favorited_tiles,
     run_generate_videos_from_manifest,
     run_load_manifest,
     run_validate_manifest,
@@ -213,9 +214,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--generate-videos",
         action="store_true",
         help=(
-            "Canonical daily-flow alias for --generate-videos-from-manifest. "
-            "Processes rows with status=image_approved AND video_prompt AND "
-            "flow_media_id. Use --limit N to cap the batch."
+            "Animate every favorited image tile in Flow with the "
+            "universal blanket video prompt. No CSV binding required. "
+            "Set VIDEO_SOURCE_MODE=approved_rows (or pass "
+            "--generate-videos-from-approved-rows) to use the legacy "
+            "row-driven path. Use --limit N to cap the batch."
+        ),
+    )
+    group.add_argument(
+        "--generate-videos-from-approved-rows",
+        action="store_true",
+        help=(
+            "Legacy: animate rows where status=image_approved AND "
+            "flow_media_id is captured. Use only if you've manually "
+            "approved rows and want to drive video from the CSV "
+            "instead of Flow's own ❤️ state."
+        ),
+    )
+    group.add_argument(
+        "--generate-videos-from-favorited-tiles",
+        action="store_true",
+        help=(
+            "Explicit alias for the default --generate-videos behavior. "
+            "Animates every ❤️ favorited image tile in Flow."
+        ),
+    )
+    parser.add_argument(
+        "--include-already-submitted",
+        action="store_true",
+        help=(
+            "With --generate-videos / --generate-videos-from-favorited-tiles, "
+            "re-submit favorited tiles even if data/video_submitted_tiles.json "
+            "says we already animated them."
         ),
     )
     parser.add_argument(
@@ -336,8 +366,43 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return run_bind_favorite(settings, logger, args.media_id, args.product_id)
 
-    if args.generate_videos_from_manifest or args.generate_videos:
+    # --- Video generation dispatch -------------------------------------
+    # The default --generate-videos path now iterates favorited Flow
+    # tiles directly. Flags that explicitly name an older mode (or
+    # setting VIDEO_SOURCE_MODE=approved_rows) keep working.
+    if args.generate_videos_from_approved_rows:
         return run_generate_videos_from_manifest(settings, logger, limit=args.limit)
+    if args.generate_videos_from_manifest:
+        # Historical alias from before the favorited-tiles path existed.
+        return run_generate_videos_from_manifest(settings, logger, limit=args.limit)
+    if args.generate_videos or args.generate_videos_from_favorited_tiles:
+        from src.config import (
+            VIDEO_SOURCE_MODE_APPROVED_ROWS,
+            VIDEO_SOURCE_MODE_FAVORITED_TILES,
+        )
+        # Explicit favorited-tiles flag forces that path regardless of
+        # the env / saved setting. Otherwise consult video_source_mode.
+        if (
+            args.generate_videos_from_favorited_tiles
+            or settings.video_source_mode == VIDEO_SOURCE_MODE_FAVORITED_TILES
+        ):
+            return run_generate_videos_from_favorited_tiles(
+                settings, logger,
+                limit=args.limit,
+                include_already_submitted=args.include_already_submitted,
+            )
+        if settings.video_source_mode == VIDEO_SOURCE_MODE_APPROVED_ROWS:
+            return run_generate_videos_from_manifest(settings, logger, limit=args.limit)
+        # Unknown mode -> safe default.
+        logger.warning(
+            "Unknown VIDEO_SOURCE_MODE=%s — falling back to favorited_tiles.",
+            settings.video_source_mode,
+        )
+        return run_generate_videos_from_favorited_tiles(
+            settings, logger,
+            limit=args.limit,
+            include_already_submitted=args.include_already_submitted,
+        )
 
     if args.run_one:
         product_index = args.product_index if args.product_index is not None else 0
