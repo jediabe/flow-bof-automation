@@ -65,6 +65,7 @@ fi
 # 4. Make every shell helper executable. ZIP extraction loses +x on
 #    some Mac extractors.
 chmod +x setup.sh start.sh stop.sh 2>/dev/null || true
+chmod +x update.sh 2>/dev/null || true
 chmod +x scripts/start_chrome_debug.sh 2>/dev/null || true
 
 # 5. Build Docker images. If the build fails, the user almost always

@@ -186,10 +186,11 @@ macOS:
 
 | Script                   | What it does                                                          |
 | ------------------------ | --------------------------------------------------------------------- |
-| `setup.ps1` / `setup.sh` | Build images, create folders, bootstrap `.env`. Re-run any time.      |
-| `start.ps1` / `start.sh` | Launch Chrome (debug) + Docker services + open the UI.                |
-| `stop.ps1` / `stop.sh`   | `docker compose down`. Asks before closing Chrome. Preserves all data. |
-| `reset.ps1` (Windows)    | Confirmed wipe of run state. **Keeps** batches, settings, API keys.   |
+| `setup.ps1` / `setup.sh`   | Build images, create folders, bootstrap `.env`. Re-run any time.      |
+| `start.ps1` / `start.sh`   | Launch Chrome (debug) + Docker services + open the UI.                |
+| `stop.ps1` / `stop.sh`     | `docker compose down`. Asks before closing Chrome. Preserves all data. |
+| `update.ps1` / `update.sh` | Pull latest from GitHub, back up your data + edits, rebuild + restart. See [docs/UPDATE.md](docs/UPDATE.md). |
+| `reset.ps1` (Windows)      | Confirmed wipe of run state. **Keeps** batches, settings, API keys.   |
 
 ---
 
@@ -241,6 +242,7 @@ flow-bof-automation/
 ├── scripts/                    ← Chrome launcher, alpha packager
 ├── docs/
 │   ├── QUICKSTART.md           ← first-batch walkthrough
+│   ├── UPDATE.md               ← how to update with one command
 │   ├── MAC_SETUP.md            ← macOS-specific install + commands
 │   ├── API_KEYS.md             ← API keys + storage + rotation
 │   ├── TROUBLESHOOTING.md      ← every alpha pitfall, indexed

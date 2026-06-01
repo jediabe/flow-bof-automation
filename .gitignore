@@ -36,6 +36,11 @@ Kalodata_Product_*.xlsx
 # Alpha distribution ZIPs
 dist/
 
+# update.ps1/update.sh writes timestamped backups here. Local-only by
+# design — these contain copies of secrets.local.json and the user's
+# entire batches dir.
+backups/
+
 # macOS noise files
 .DS_Store
 .AppleDouble
