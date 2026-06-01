@@ -1,0 +1,39 @@
+# Keep the build context small and exclude host-only files.
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.idea
+.vscode
+
+# Local-only env files; the container gets its env from docker-compose.yml.
+.env
+
+# Runtime artifacts live on the host via bind mount.
+outputs/
+inputs/products.csv
+inputs/products.csv.bak.*
+inputs/products.csv.*.tmp
+.browser_profile/
+
+# OS clutter
+Thumbs.db
+.DS_Store
+
+# Throwaway scripts created during debugging
+_test_resolver.py
+
+# Local UI-managed settings; baked-in keys would leak between testers.
+# The runtime mounts ./data into the container, so the live files are
+# still visible to both ui and app services — they just aren't copied
+# into the image at build time.
+data/secrets.local.json
+data/settings.local.json
+
+# Alpha packaging output
+dist/
+

@@ -1,0 +1,26 @@
+[
+  {
+    "product_name": "Slim Fit Shapewear Bodysuit",
+    "category": "clothing",
+    "product_image_path": "inputs/sample_images/shapewear.jpg",
+    "store": "Target",
+    "placement_type": "folded display table",
+    "prompt_override": null
+  },
+  {
+    "product_name": "Wireless Earbuds Pro",
+    "category": "electronics",
+    "product_image_path": "inputs/sample_images/earbuds.jpg",
+    "store": "Best Buy",
+    "placement_type": "retail shelf display",
+    "prompt_override": null
+  },
+  {
+    "product_name": "Hydrating Vitamin C Serum",
+    "category": "beauty",
+    "product_image_path": "inputs/sample_images/serum.jpg",
+    "store": "Sephora",
+    "placement_type": "beauty shelf display",
+    "prompt_override": null
+  }
+]

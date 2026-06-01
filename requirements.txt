@@ -1,0 +1,22 @@
+playwright==1.48.0
+python-dotenv==1.0.1
+streamlit==1.39.0
+# AI providers used by ai/prompt_generator.py.
+# `anthropic` only fires when AI_PROVIDER=anthropic, `openai` for both
+# openai and openrouter (the latter uses the OpenAI client with a
+# different base_url).
+openai==1.57.4
+anthropic==0.42.0
+# Pin httpx below 0.28 because that release removed the `proxies` kwarg
+# that older openai/anthropic SDK builds still pass. The bumped SDK
+# versions above already handle httpx>=0.28, but pinning here is a
+# belt-and-suspenders fix that survives if either SDK is downgraded
+# during a future requirements edit.
+httpx<0.28
+# Adds a "Paste image" button per product card. Uses the browser's
+# Async Clipboard API (HTTPS/localhost only). If absent, the UI
+# gracefully degrades to the file-uploader path.
+streamlit-paste-button==0.1.2
+# Read Kalodata's .xlsx exports (LIST_PRODUCT sheet) on the
+# Product Intake page.
+openpyxl==3.1.5

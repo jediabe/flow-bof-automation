@@ -1,0 +1,80 @@
+id,product_name,image_path,image_prompt,video_prompt,status,flow_tile_id,flow_image_src,flow_media_id,tile_href,category,store,placement_type,prompt_override,notes
+1,899PCS Large Capacity Metal Hand Toolbox Ultimate Home Repair Master Set,inputs/reference_images/01.png,"Editorial retail product shot of the 899PCS Large Capacity Metal Hand
+   Toolbox displayed exactly as shown in the reference image with all 4
+   drawers open showing the complete tool set inside on a floor display
+   inside a hardware and home improvement store. Match the product's
+   color, texture, size, and details precisely as they appear in the
+   reference. The product is the clear hero focus with open negative
+   space surrounding it, nothing else nearby. No store logos, no brand
+   signage, no price tags visible anywhere. Bright clean overhead
+   lighting combined with cool ambient retail lighting. Background
+   softly blurred with realistic retail shelving and store atmosphere
+   visible in the distance. Shot on a handheld iPhone 15 Pro style
+   camera with authentic casual shopper framing and slight natural
+   imperfections. Visible realism: realistic textures, slight dust
+   particles catching light, natural shadows, true-to-size proportions.
+   Not cinematic, not studio lighting, not glossy CGI, not overly
+   polished. Looks like a real customer discovered the viral TikTok
+   Shop deal while browsing.","Realistic handheld iPhone 15 Pro UGC video inside a hardware and
+   home improvement store. Bright clean overhead lighting with cool
+   ambient retail lighting. The camera slowly moves closer to the
+   899PCS Metal Hand Toolbox on the floor display as if a shopper is
+   filming it for TikTok. A person's hand enters frame and lightly taps
+   the toolbox while showing off the open drawers and complete tool set.
+   The product remains completely still. Natural handheld motion with
+   subtle camera shake, realistic lighting, casual shopper vibe,
+   authentic retail environment, realistic physics. Not cinematic, not
+   studio, not CGI.",video_submitted,fe_id_6756f34f-5aef-4c34-9980-ba47222064db,/fx/api/trpc/media.getMediaUrlRedirect?name=60d85e91-eb85-494d-92b3-431686e3912a,60d85e91-eb85-494d-92b3-431686e3912a,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/56d7286a-ab32-4b1b-854f-caf53b1ab727,auto,,,,
+2,Manual Garden Tractor and Lawn Mower Lift Jack 882 Lbs Capacity,inputs/reference_images/02.webp,"Editorial retail product shot of the Manual Garden Tractor and Lawn
+   Mower Lift Jack displayed exactly as shown in the reference image
+   assembled and upright on a floor display inside a hardware and home
+   improvement store. Match the product's color, texture, size, and
+   details precisely as they appear in the reference. The product is
+   the clear hero focus with open negative space surrounding it, nothing
+   else nearby. No store logos, no brand signage, no price tags visible
+   anywhere. Bright clean overhead lighting combined with cool ambient
+   retail lighting. Background softly blurred with realistic retail
+   shelving and store atmosphere visible in the distance. Shot on a
+   handheld iPhone 15 Pro style camera with authentic casual shopper
+   framing and slight natural imperfections. Visible realism: realistic
+   textures, slight dust particles catching light, natural shadows,
+   true-to-size proportions. Not cinematic, not studio lighting, not
+   glossy CGI, not overly polished. Looks like a real customer
+   discovered the viral TikTok Shop deal while browsing.","Realistic handheld iPhone 15 Pro UGC video inside a hardware and
+   home improvement store. Bright clean overhead lighting with cool
+   ambient retail lighting. The camera slowly moves closer to the Lawn
+   Mower Lift Jack on the floor display as if a shopper is filming it
+   for TikTok. A person's hand enters frame and lightly taps the manual
+   handle while showing off the full product form. The product remains
+   completely still. Natural handheld motion with subtle camera shake,
+   realistic lighting, casual shopper vibe, authentic retail
+   environment, realistic physics. Not cinematic, not studio, not CGI.",video_submitted,fe_id_13532953-2ded-4d1b-889a-07c2a2b11912,/fx/api/trpc/media.getMediaUrlRedirect?name=54a0b3b1-6493-482e-972c-4f082f194e9b,54a0b3b1-6493-482e-972c-4f082f194e9b,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/25e173c7-c956-4882-9ee8-6ab4052c537e,auto,,,,
+3,SUV Roof Step Assist No Tools Required Door Latch Hook,inputs/reference_images/03.webp,"Editorial retail product shot of the SUV Roof Step Assist displayed
+   exactly as shown in the reference image hooked onto a car door latch
+   inside a modern automotive accessories retail store shown exactly as
+   it would be used in real life. Match the product's color, texture,
+   size, and details precisely as they appear in the reference. The
+   product is the clear hero focus with open negative space surrounding
+   it, nothing else nearby. No store logos, no brand signage, no price
+   tags visible anywhere. Bright clean overhead lighting combined with
+   cool ambient automotive retail lighting. Background softly blurred
+   with realistic retail atmosphere visible in the distance. Shot on a
+   handheld iPhone 15 Pro style camera with authentic casual shopper
+   framing and slight natural imperfections. Visible realism: realistic
+   textures, slight dust particles catching light, natural shadows,
+   true-to-size proportions. Not cinematic, not studio lighting, not
+   glossy CGI, not overly polished. Looks like a real customer
+   discovered the viral TikTok Shop deal while browsing.","Realistic handheld iPhone 15 Pro UGC video inside an automotive
+   accessories retail store. Bright clean overhead lighting with cool
+   ambient automotive retail lighting. The camera slowly moves closer
+   to the SUV Roof Step Assist hooked onto the car door latch as if a
+   shopper is filming it for TikTok. A person's hand enters frame and
+   lightly taps the step assist while showing it in its installed
+   position. The product remains completely still. Natural handheld
+   motion with subtle camera shake, realistic lighting, casual shopper
+   vibe, authentic retail environment, realistic physics. Not cinematic,
+   not studio, not CGI.",video_submitted,fe_id_5c01184b-3050-41fc-91ca-31d54b552dc6,/fx/api/trpc/media.getMediaUrlRedirect?name=e4800989-3654-47fc-a112-9a089e3e7cff,e4800989-3654-47fc-a112-9a089e3e7cff,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/9cd40294-7f5a-4255-875f-6507641ec9c3,auto,,,,
+01,Whale Rechargeable Water Table Pump with Sprinkler (Blue Purple),inputs/reference_images/01.webp,"Use the reference image as the source of truth for the product color, shape, and branding. Place the blue purple whale-shaped water pump with sprinkler attachment on a low shelf inside a bright, busy toy store — think Target toy aisle or a kids' outdoor section. Surrounding shelves slightly visible in soft focus background with colorful packaging. Lighting is natural overhead retail fluorescent, slightly warm. Shot feels like a casual iPhone photo taken mid-aisle by a parent browsing. No price tags visible. No blurred background. No studio lighting. No CGI sheen. Slight lens imperfection. Product is the clear focal point with nothing crowding it directly. True to size — looks like a handheld pump accessory, not oversized.","Slow handheld push toward the whale water pump sitting on the toy store shelf. Camera drifts in naturally, slightly unsteady like a real phone video. A single hand enters from the right, gently taps/pokes the top of the whale pump, then pulls back. Camera eases out to show the full product on the shelf. Product label and whale shape clearly visible within first 3 seconds. One hand only. No zoom cuts — continuous natural motion. 5 seconds total.",image_submitted,fe_id_feed3c9b-a954-4fcf-8558-0cee7b634558,/fx/api/trpc/media.getMediaUrlRedirect?name=6818cc7a-7c47-427b-bbbf-b0aceecc80e1,6818cc7a-7c47-427b-bbbf-b0aceecc80e1,/fx/tools/flow/project/29542ba4-db6d-46cd-a214-5424c4015733/edit/bb2838a4-2a2a-4602-a278-fe8f64e2b0be,auto,,,,
+02,Miracle Mold Remover Gel + Scrub Brush (7oz),inputs/reference_images/02.webp,"Use the reference image as the source of truth for the product — a 7oz gel tube/bottle of Miracle Mold Remover with a scrub brush included. Place both items together on a cleaning products shelf inside a pharmacy or home goods store — think CVS cleaning aisle or a Walmart household section. Shelf label strips slightly visible below, other cleaning products softly blurred in background. Overhead retail lighting, slightly cool/white. Photo looks like it was taken on an iPhone by someone casually browsing the cleaning aisle. No price tags. No studio gloss. Slight natural imperfection in the shot. Product is the clear focal point. Both the gel and brush are fully visible and true to size.","Slow handheld camera push toward the mold remover gel and scrub brush sitting side by side on the pharmacy shelf. Slight natural camera shake as it drifts in. A single hand enters from the left, picks up the gel bottle briefly to show the front label, sets it back down. Camera pulls back to reveal both products together on the shelf. Label text clearly readable within first 3 seconds. One hand only. Smooth continuous motion, no cuts. 5 seconds total.",image_submitted,fe_id_787dcb11-9dd9-4f0b-940a-d5bdeff8d8fa,/fx/api/trpc/media.getMediaUrlRedirect?name=f9314df5-755e-490a-8dbb-fa47fecc94e4,f9314df5-755e-490a-8dbb-fa47fecc94e4,/fx/tools/flow/project/29542ba4-db6d-46cd-a214-5424c4015733/edit/0f3dc526-71f3-4ba4-a52e-e65c7212fdb2,auto,,,,
+03,ANTA UNISEX KAI 1 Basketball Shoes (Black White),inputs/reference_images/03.webp,"Use the reference image as the source of truth for the shoe colorway — black and white ANTA KAI 1 basketball shoes. Place a single shoe (or pair angled naturally) on a low display shelf inside a sports or shoe store — think Foot Locker or a Dick's Sporting Goods footwear wall. Other sneakers softly visible on shelves in the background. Retail overhead lighting with slight warm tone. Shot looks like an iPhone photo taken by a shopper crouching down to check out the shoe. No price tags. No studio background. No CGI reflections. Slight natural grain. Shoe is the full focal point, nothing directly beside it competing for attention. True to size — reads as a full-size adult basketball shoe.","Slow handheld push toward the black and white ANTA KAI 1 sitting on the shoe store display shelf. Camera drifts in low and slightly angled, natural handheld wobble. A single hand enters from the right, taps the toe box of the shoe lightly, then withdraws. Camera eases back to show the full shoe and surrounding shelf context. ANTA branding and KAI 1 detail visible within first 3 seconds. One hand only. No jump cuts — fluid motion throughout. 5 seconds total.",image_submitted,fe_id_0bb4f908-0218-484b-b30c-a99b806e342b,/fx/api/trpc/media.getMediaUrlRedirect?name=e07a849a-f9b3-493a-b26e-f95431c1cbd3,e07a849a-f9b3-493a-b26e-f95431c1cbd3,/fx/tools/flow/project/29542ba4-db6d-46cd-a214-5424c4015733/edit/660a6c7e-5855-4b5c-938b-b17ffa62b1e4,auto,,,,
+04,"ONBRILL 13/10FT Cantilever Patio Umbrella with Base (Adjustable Tilt, Double-Sided)",inputs/reference_images/04.webp,"Use the reference image as the source of truth for the umbrella — a large cantilever offset patio umbrella with visible base, adjustable tilt mechanism, and double-sided canopy. Place it on a display floor inside a large home goods or outdoor furniture store — think Home Depot garden center or a Costco seasonal outdoor section. Other patio furniture and umbrellas softly visible in the background. Bright overhead warehouse-style retail lighting. Shot looks like a casual iPhone photo taken by someone walking through the outdoor section. No price tags. No studio backdrop. No glossy CGI finish. Umbrella is fully open and upright, base visible at the bottom, the full canopy span readable. True to scale — looks impressively large. Slight natural photo imperfection.","Slow handheld walk toward the open cantilever umbrella standing on the home store floor display. Camera approaches from slightly below the canopy edge, drifting naturally with mild handheld shake. A single hand enters from the left and gently pushes one of the canopy ribs to show the tilt mechanism, then pulls back. Camera eases out to frame the entire umbrella including the base. Canopy color and offset arm clearly visible within first 3 seconds. One hand only. Continuous smooth motion, no cuts. 5 seconds total.",pending,,,,,auto,,,,

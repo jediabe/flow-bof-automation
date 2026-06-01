@@ -1,0 +1,79 @@
+id,product_name,image_path,image_prompt,video_prompt,status,flow_tile_id,flow_image_src,flow_media_id,tile_href,category,store,placement_type,prompt_override,notes
+,3da1cb5ca6df46a08396a91e900b9db5~tplv Fhlh96nyum Crop Webp 2000 2000,inputs/incoming_images/3da1cb5ca6df46a08396a91e900b9db5~tplv-fhlh96nyum-crop-webp_2000_2000.webp,,,image_submitted,fe_id_d88ddb34-7d55-47f2-bdf2-ba683af09ed3,/fx/api/trpc/media.getMediaUrlRedirect?name=2b953262-eaed-411c-993f-07c46db16807,2b953262-eaed-411c-993f-07c46db16807,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/3db93292-8214-44b3-a346-7b08ac58a437,auto,,,,
+,750d3d6bc480451c9e4086c41ddde73b~tplv Fhlh96nyum Crop Webp 1489 1500,inputs/incoming_images/750d3d6bc480451c9e4086c41ddde73b~tplv-fhlh96nyum-crop-webp_1489_1500.webp,,,image_submitted,fe_id_d88ddb34-7d55-47f2-bdf2-ba683af09ed3,/fx/api/trpc/media.getMediaUrlRedirect?name=2b953262-eaed-411c-993f-07c46db16807,2b953262-eaed-411c-993f-07c46db16807,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/3db93292-8214-44b3-a346-7b08ac58a437,auto,,,,
+,7db9970bdb154c019976bd64b6aa2f81,inputs/incoming_images/7db9970bdb154c019976bd64b6aa2f81.png,,,image_submitted,fe_id_934898be-332d-4932-a265-18ce6ffff19d,/fx/api/trpc/media.getMediaUrlRedirect?name=5254eb7d-1f4e-48d5-8eb2-0a55369ba45b,5254eb7d-1f4e-48d5-8eb2-0a55369ba45b,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/2529c5e8-d6d6-438c-b40b-9a75c3e41365,auto,,,,
+01,899PCS Large Capacity Metal Hand Toolbox Ultimate Home Repair Master Set,inputs/reference_images/01.png,"Editorial retail product shot of the 899PCS Large Capacity Metal Hand
+   Toolbox displayed exactly as shown in the reference image with all 4
+   drawers open showing the complete tool set inside on a floor display
+   inside a hardware and home improvement store. Match the product's
+   color, texture, size, and details precisely as they appear in the
+   reference. The product is the clear hero focus with open negative
+   space surrounding it, nothing else nearby. No store logos, no brand
+   signage, no price tags visible anywhere. Bright clean overhead
+   lighting combined with cool ambient retail lighting. Background
+   softly blurred with realistic retail shelving and store atmosphere
+   visible in the distance. Shot on a handheld iPhone 15 Pro style
+   camera with authentic casual shopper framing and slight natural
+   imperfections. Visible realism: realistic textures, slight dust
+   particles catching light, natural shadows, true-to-size proportions.
+   Not cinematic, not studio lighting, not glossy CGI, not overly
+   polished. Looks like a real customer discovered the viral TikTok
+   Shop deal while browsing.","Realistic handheld iPhone 15 Pro UGC video inside a hardware and
+   home improvement store. Bright clean overhead lighting with cool
+   ambient retail lighting. The camera slowly moves closer to the
+   899PCS Metal Hand Toolbox on the floor display as if a shopper is
+   filming it for TikTok. A person's hand enters frame and lightly taps
+   the toolbox while showing off the open drawers and complete tool set.
+   The product remains completely still. Natural handheld motion with
+   subtle camera shake, realistic lighting, casual shopper vibe,
+   authentic retail environment, realistic physics. Not cinematic, not
+   studio, not CGI.",image_submitted,fe_id_934898be-332d-4932-a265-18ce6ffff19d,/fx/api/trpc/media.getMediaUrlRedirect?name=5254eb7d-1f4e-48d5-8eb2-0a55369ba45b,5254eb7d-1f4e-48d5-8eb2-0a55369ba45b,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/2529c5e8-d6d6-438c-b40b-9a75c3e41365,auto,,,,
+02,Manual Garden Tractor and Lawn Mower Lift Jack 882 Lbs Capacity,inputs/reference_images/02.webp,"Editorial retail product shot of the Manual Garden Tractor and Lawn
+   Mower Lift Jack displayed exactly as shown in the reference image
+   assembled and upright on a floor display inside a hardware and home
+   improvement store. Match the product's color, texture, size, and
+   details precisely as they appear in the reference. The product is
+   the clear hero focus with open negative space surrounding it, nothing
+   else nearby. No store logos, no brand signage, no price tags visible
+   anywhere. Bright clean overhead lighting combined with cool ambient
+   retail lighting. Background softly blurred with realistic retail
+   shelving and store atmosphere visible in the distance. Shot on a
+   handheld iPhone 15 Pro style camera with authentic casual shopper
+   framing and slight natural imperfections. Visible realism: realistic
+   textures, slight dust particles catching light, natural shadows,
+   true-to-size proportions. Not cinematic, not studio lighting, not
+   glossy CGI, not overly polished. Looks like a real customer
+   discovered the viral TikTok Shop deal while browsing.","Realistic handheld iPhone 15 Pro UGC video inside a hardware and
+   home improvement store. Bright clean overhead lighting with cool
+   ambient retail lighting. The camera slowly moves closer to the Lawn
+   Mower Lift Jack on the floor display as if a shopper is filming it
+   for TikTok. A person's hand enters frame and lightly taps the manual
+   handle while showing off the full product form. The product remains
+   completely still. Natural handheld motion with subtle camera shake,
+   realistic lighting, casual shopper vibe, authentic retail
+   environment, realistic physics. Not cinematic, not studio, not CGI.",image_submitted,fe_id_235d8f27-f8b1-4f33-a52b-4428d96fc98b,/fx/api/trpc/media.getMediaUrlRedirect?name=c8b1498b-4fad-439a-af8b-02b25389f789,c8b1498b-4fad-439a-af8b-02b25389f789,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/4cbed9b7-7e11-407f-a15a-c9dc3ba5f1cf,auto,,,,
+03,SUV Roof Step Assist No Tools Required Door Latch Hook,inputs/reference_images/03.webp,"Editorial retail product shot of the SUV Roof Step Assist displayed
+   exactly as shown in the reference image hooked onto a car door latch
+   inside a modern automotive accessories retail store shown exactly as
+   it would be used in real life. Match the product's color, texture,
+   size, and details precisely as they appear in the reference. The
+   product is the clear hero focus with open negative space surrounding
+   it, nothing else nearby. No store logos, no brand signage, no price
+   tags visible anywhere. Bright clean overhead lighting combined with
+   cool ambient automotive retail lighting. Background softly blurred
+   with realistic retail atmosphere visible in the distance. Shot on a
+   handheld iPhone 15 Pro style camera with authentic casual shopper
+   framing and slight natural imperfections. Visible realism: realistic
+   textures, slight dust particles catching light, natural shadows,
+   true-to-size proportions. Not cinematic, not studio lighting, not
+   glossy CGI, not overly polished. Looks like a real customer
+   discovered the viral TikTok Shop deal while browsing.","Realistic handheld iPhone 15 Pro UGC video inside an automotive
+   accessories retail store. Bright clean overhead lighting with cool
+   ambient automotive retail lighting. The camera slowly moves closer
+   to the SUV Roof Step Assist hooked onto the car door latch as if a
+   shopper is filming it for TikTok. A person's hand enters frame and
+   lightly taps the step assist while showing it in its installed
+   position. The product remains completely still. Natural handheld
+   motion with subtle camera shake, realistic lighting, casual shopper
+   vibe, authentic retail environment, realistic physics. Not cinematic,
+   not studio, not CGI.",image_submitted,fe_id_235d8f27-f8b1-4f33-a52b-4428d96fc98b,/fx/api/trpc/media.getMediaUrlRedirect?name=c8b1498b-4fad-439a-af8b-02b25389f789,c8b1498b-4fad-439a-af8b-02b25389f789,/fx/tools/flow/project/54e96dd1-eb1a-40bf-9a06-10fabc82db37/edit/4cbed9b7-7e11-407f-a15a-c9dc3ba5f1cf,auto,,,,

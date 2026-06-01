@@ -1,0 +1,144 @@
+# Phase 1 Docker layout for flow-bof-automation.
+#
+# Architecture:
+#   host Chrome (--remote-debugging-port=9222)
+#       ▲
+#       │   host.docker.internal:9222
+#       │
+#   [cdp-proxy]  nginx, listens on 9333, rewrites Host header
+#       ▲
+#       │   http://cdp-proxy:9333
+#       │
+#   [app]        Python CLI (Playwright connect_over_cdp)
+#
+# The proxy is necessary because Chrome's debugger endpoint rejects
+# requests whose Host header isn't 127.0.0.1/localhost. Without it,
+# /json/version returns HTTP 500 from inside the container. See
+# docker/cdp-proxy.conf for details.
+#
+# Use:
+#   docker compose build
+#   docker compose run --rm app python main.py --check-browser
+#   docker compose run --rm app python main.py --load-manifest --fresh
+#   docker compose run --rm app python main.py --generate-images --limit 30
+#   docker compose run --rm app python main.py --sync-favorites
+#   docker compose run --rm app python main.py --generate-videos --limit 30
+
+services:
+  cdp-proxy:
+    image: nginx:alpine
+    container_name: flow-bof-cdp-proxy
+    volumes:
+      - ./docker/cdp-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    # No `ports:` line: only the app container talks to this on the
+    # docker network. Exposing 9333 to the host is not needed.
+
+  app:
+    build: .
+    image: flow-bof-automation:latest
+    working_dir: /app
+    depends_on:
+      - cdp-proxy
+    extra_hosts:
+      # Harmless in proxy mode — kept so debugging tools inside the
+      # container can still resolve host.docker.internal directly.
+      - "host.docker.internal:host-gateway"
+    environment:
+      # --- forced for the container, regardless of the host's .env ---
+      BROWSER_MODE: remote_debugging
+      # The app now reaches Chrome via the cdp-proxy service inside the
+      # docker network. The proxy forwards to host.docker.internal:9222.
+      CHROME_CDP_URL: http://cdp-proxy:9333
+      # --- defaults you can override via a .env file in this directory ---
+      FLOW_LABS_URL: "${FLOW_LABS_URL:-https://labs.google/flow}"
+      HEADLESS: "${HEADLESS:-false}"
+      GENERATION_TIMEOUT_SECONDS: "${GENERATION_TIMEOUT_SECONDS:-180}"
+      SELECTOR_TIMEOUT_MS: "${SELECTOR_TIMEOUT_MS:-15000}"
+      SLOW_MO_MS: "${SLOW_MO_MS:-0}"
+      SAVE_OUTPUT_IMAGE: "${SAVE_OUTPUT_IMAGE:-false}"
+      VERIFY_GENERATION_STARTED: "${VERIFY_GENERATION_STARTED:-false}"
+      CAPTURE_TIMEOUT_SECONDS: "${CAPTURE_TIMEOUT_SECONDS:-60}"
+      # --- AI Product Intake (Phase 3) ---
+      AI_PROVIDER: "${AI_PROVIDER:-manual}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-anthropic/claude-3.5-sonnet}"
+      OPENROUTER_SITE_URL: "${OPENROUTER_SITE_URL:-}"
+      OPENROUTER_APP_NAME: "${OPENROUTER_APP_NAME:-flow-bof-automation}"
+      # --- Video-flow stability ---
+      AUTOMATION_MODE:            "${AUTOMATION_MODE:-safe}"
+      DEBUG_SCREENSHOTS:          "${DEBUG_SCREENSHOTS:-false}"
+      IMAGE_BETWEEN_PRODUCTS_MS:  "${IMAGE_BETWEEN_PRODUCTS_MS:-}"
+      IMAGE_UI_SETTLE_MS:         "${IMAGE_UI_SETTLE_MS:-}"
+      IMAGE_FAST_SUBMIT_MODE:     "${IMAGE_FAST_SUBMIT_MODE:-true}"
+      IMAGE_SIBLING_WINDOW_MS:    "${IMAGE_SIBLING_WINDOW_MS:-2000}"
+      VIDEO_TILE_SETTLE_MS:       "${VIDEO_TILE_SETTLE_MS:-}"
+      VIDEO_AFTER_HOVER_MS:       "${VIDEO_AFTER_HOVER_MS:-}"
+      VIDEO_AFTER_MENU_CLICK_MS:  "${VIDEO_AFTER_MENU_CLICK_MS:-}"
+      VIDEO_BETWEEN_PRODUCTS_MS:  "${VIDEO_BETWEEN_PRODUCTS_MS:-}"
+      VIDEO_RETRY_COUNT:          "${VIDEO_RETRY_COUNT:-}"
+    volumes:
+      # Bind the whole project so inputs, outputs, and code edits all
+      # stay in sync without rebuilding the image.
+      - .:/app
+
+  # Phase 2 — Streamlit UI. Same image as `app`, different command +
+  # exposed port. Subprocesses `python main.py …` for all browser /
+  # CSV-mutating operations, so the CLI flow is reused unchanged.
+  ui:
+    build: .
+    image: flow-bof-automation:latest
+    container_name: flow-bof-ui
+    working_dir: /app
+    command: >
+      streamlit run streamlit_app.py
+      --server.port=8080
+      --server.address=0.0.0.0
+      --browser.gatherUsageStats=false
+    ports:
+      - "8080:8080"
+    depends_on:
+      - cdp-proxy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      BROWSER_MODE: remote_debugging
+      CHROME_CDP_URL: http://cdp-proxy:9333
+      FLOW_LABS_URL: "${FLOW_LABS_URL:-https://labs.google/flow}"
+      HEADLESS: "${HEADLESS:-false}"
+      GENERATION_TIMEOUT_SECONDS: "${GENERATION_TIMEOUT_SECONDS:-180}"
+      SELECTOR_TIMEOUT_MS: "${SELECTOR_TIMEOUT_MS:-15000}"
+      SLOW_MO_MS: "${SLOW_MO_MS:-0}"
+      SAVE_OUTPUT_IMAGE: "${SAVE_OUTPUT_IMAGE:-false}"
+      VERIFY_GENERATION_STARTED: "${VERIFY_GENERATION_STARTED:-false}"
+      CAPTURE_TIMEOUT_SECONDS: "${CAPTURE_TIMEOUT_SECONDS:-60}"
+      # --- AI Product Intake (Phase 3) ---
+      AI_PROVIDER: "${AI_PROVIDER:-manual}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-anthropic/claude-3.5-sonnet}"
+      OPENROUTER_SITE_URL: "${OPENROUTER_SITE_URL:-}"
+      OPENROUTER_APP_NAME: "${OPENROUTER_APP_NAME:-flow-bof-automation}"
+      AUTOMATION_MODE:            "${AUTOMATION_MODE:-safe}"
+      DEBUG_SCREENSHOTS:          "${DEBUG_SCREENSHOTS:-false}"
+      IMAGE_BETWEEN_PRODUCTS_MS:  "${IMAGE_BETWEEN_PRODUCTS_MS:-}"
+      IMAGE_UI_SETTLE_MS:         "${IMAGE_UI_SETTLE_MS:-}"
+      IMAGE_FAST_SUBMIT_MODE:     "${IMAGE_FAST_SUBMIT_MODE:-true}"
+      IMAGE_SIBLING_WINDOW_MS:    "${IMAGE_SIBLING_WINDOW_MS:-2000}"
+      VIDEO_TILE_SETTLE_MS:       "${VIDEO_TILE_SETTLE_MS:-}"
+      VIDEO_AFTER_HOVER_MS:       "${VIDEO_AFTER_HOVER_MS:-}"
+      VIDEO_AFTER_MENU_CLICK_MS:  "${VIDEO_AFTER_MENU_CLICK_MS:-}"
+      VIDEO_BETWEEN_PRODUCTS_MS:  "${VIDEO_BETWEEN_PRODUCTS_MS:-}"
+      VIDEO_RETRY_COUNT:          "${VIDEO_RETRY_COUNT:-}"
+    volumes:
+      - .:/app
+    restart: unless-stopped
