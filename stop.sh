@@ -5,8 +5,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Resolve docker CLI even if Docker Desktop hasn't put it on PATH yet.
+# We DON'T wait for the daemon here -- if the daemon is already down,
+# `compose down` is effectively a no-op and we want that to be fast.
+# shellcheck disable=SC1091
+source "scripts/_mac_docker_ready.sh"
+if ! _find_docker_cli; then
+    echo "[WARN] Could not locate the docker CLI. If Docker Desktop is" >&2
+    echo "       running, the containers are already down. If not, install" >&2
+    echo "       Docker Desktop from https://www.docker.com/products/docker-desktop/" >&2
+    exit 0
+fi
+
 printf "\nStopping Docker services...\n"
-if ! docker compose down --remove-orphans; then
+if ! "${DOCKER_BIN}" compose down --remove-orphans; then
     echo "[WARN] docker compose down exited non-zero." >&2
 fi
 

@@ -11,13 +11,12 @@ printf "============================================================\n"
 printf " Flow BOF Automation -- start (macOS)\n"
 printf "============================================================\n\n"
 
-# 1. Quick sanity: docker is up.
-if ! docker info >/dev/null 2>&1; then
-    echo "[FAIL] Docker Desktop is not running." >&2
-    echo "       Open Docker Desktop, wait for it to finish starting," >&2
-    echo "       then re-run ./start.sh" >&2
-    exit 1
-fi
+# 1. Make sure Docker is installed AND ready. Same helper used by
+#    setup.sh -- detects CLI, opens Docker Desktop if needed, waits
+#    up to 180s for the daemon. Sets $DOCKER_BIN on success.
+# shellcheck disable=SC1091
+source "scripts/_mac_docker_ready.sh"
+ensure_docker_ready
 
 # 2. Chrome debug profile. The chrome script handles the "Chrome already
 #    running" warning. We continue regardless so a misconfigured Chrome
@@ -37,7 +36,7 @@ fi
 # 3. Docker services. Only bring up what the user needs (cdp-proxy + ui);
 #    the app service is on-demand via 'docker compose run --rm app ...'.
 echo "Starting Docker services (cdp-proxy + ui)..."
-docker compose up -d cdp-proxy ui
+"${DOCKER_BIN}" compose up -d cdp-proxy ui
 
 # 4. Wait for the UI to respond on :8080.
 echo "Waiting for UI..."
@@ -52,8 +51,8 @@ done
 
 if [[ "$ready" -eq 0 ]]; then
     echo "[WARN] UI didn't respond at http://localhost:8080 within 30s."
-    echo "       Check 'docker compose logs ui'. The browser will still"
-    echo "       open; refresh once the container is up."
+    echo "       Check '${DOCKER_BIN} compose logs ui'. The browser will"
+    echo "       still open; refresh once the container is up."
 else
     echo "[OK] UI is up."
 fi

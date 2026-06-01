@@ -11,22 +11,14 @@ printf "============================================================\n"
 printf " Flow BOF Automation -- setup (macOS)\n"
 printf "============================================================\n\n"
 
-# 1. Verify Docker is installed AND its daemon is reachable.
-if ! command -v docker >/dev/null 2>&1; then
-    echo "[FAIL] Docker is not installed on this Mac." >&2
-    echo "       Install Docker Desktop for Mac:" >&2
-    echo "       https://www.docker.com/products/docker-desktop/" >&2
-    echo "       Then re-run ./setup.sh" >&2
-    exit 1
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    echo "[FAIL] Docker is installed but the daemon isn't responding." >&2
-    echo "       Open Docker Desktop and wait for the whale icon to" >&2
-    echo "       stop animating, then re-run ./setup.sh" >&2
-    exit 1
-fi
-echo "[OK] Docker Desktop is running."
+# 1. Make sure Docker is installed AND ready. The helper handles the
+#    full lifecycle: locates the docker CLI (PATH, Docker.app bundle,
+#    or /usr/local/bin), opens Docker Desktop if it's installed but
+#    dormant, and waits up to 180s for the daemon to respond. Sets
+#    $DOCKER_BIN on success; exits on hard failure with a clear message.
+# shellcheck disable=SC1091
+source "scripts/_mac_docker_ready.sh"
+ensure_docker_ready
 
 # 2. Create the folders the app expects.
 folders=(
@@ -71,7 +63,7 @@ chmod +x scripts/start_chrome_debug.sh 2>/dev/null || true
 # 5. Build Docker images.
 echo ""
 echo "Building Docker images (this can take a few minutes the first time)..."
-docker compose build
+"${DOCKER_BIN}" compose build
 
 echo ""
 echo "============================================================"

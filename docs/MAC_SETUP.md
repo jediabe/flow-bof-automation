@@ -30,6 +30,13 @@ chmod +x setup.sh start.sh stop.sh scripts/start_chrome_debug.sh
 `.env.example` → `.env`, sets the executable bit on the rest of the shell
 scripts, and runs `docker compose build`. Safe to re-run.
 
+If you just installed Docker Desktop and haven't opened it yet, that's
+fine — `setup.sh` will detect the bundled CLI inside `Docker.app`, run
+`open -a Docker` for you, and wait up to 180 seconds for the daemon to
+report ready. The same logic runs at the top of `start.sh`. You should
+**not** see "Docker is not installed" as long as `/Applications/Docker.app`
+exists.
+
 ## Daily startup
 
 ```bash
@@ -92,7 +99,8 @@ settings, and API keys are preserved. Run `./start.sh` to resume.
 
 | Symptom                                       | Fix                                                                 |
 | --------------------------------------------- | ------------------------------------------------------------------- |
-| `docker info` errors / hangs.                 | Open **Docker Desktop**. Wait for the whale icon in the menu bar to stop animating. |
+| `docker info` errors / hangs.                 | `setup.sh` / `start.sh` auto-open Docker Desktop and wait 180s. If it still times out, open **Docker Desktop** manually and wait for the menu-bar whale to say "Docker is running", then rerun. |
+| "Docker Desktop is installed but did not become ready within 180s." | First-launch can be slow on older Macs. Open Docker Desktop manually, finish its first-run prompts (it may ask for your password to install the CLI helper), then rerun the script. |
 | `./setup.sh: Permission denied`               | Run `chmod +x setup.sh start.sh stop.sh scripts/start_chrome_debug.sh` and retry. |
 | `Google Chrome not found at /Applications/Google Chrome.app` | Install Chrome from <https://www.google.com/chrome/>. If you installed it somewhere else, move it to `/Applications/`. |
 | "Chrome debugger unreachable" in the UI Setup health check. | Chrome was already running when `start.sh` fired. Quit Chrome entirely (Cmd+Q in the menu bar; check the dot under the icon is gone), then `./start.sh` again. |
