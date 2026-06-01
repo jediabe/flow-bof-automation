@@ -1,0 +1,37 @@
+.env
+.env.local
+*.local.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.browser_profile/
+.vscode/
+.idea/
+chrome-flow-automation/
+
+# Generated outputs / local artifacts
+outputs/
+!outputs/**/.gitkeep
+
+# UI-managed local config — never commit. Real keys live in
+# secrets.local.json. The settings file is also gitignored because it
+# may contain user-specific paths and model preferences.
+data/secrets.local.json
+data/settings.local.json
+data/unmatched_favorites.json
+
+data/batches/
+
+# Local input/export files
+inputs/products.csv
+inputs/reference_images/
+
+# Spreadsheet and export files
+*.xlsx
+*.xls
+*.csv
+Kalodata_Product_*.xlsx
+
+# Alpha distribution ZIPs
+dist/
