@@ -152,11 +152,34 @@ fix in `src/sync_workflow.py:_backfill_media_ids_from_tile_ids`.
 **Fix**
 - The tool already retries with multiple click strategies. If it eventually
   fails:
-  1. Set `AUTOMATION_MODE=safe` in `.env` (or in the Advanced panel in the UI)
-     to slow down hovers and clicks.
+  1. Set `AUTOMATION_MODE=balanced` in `.env` (or in the Advanced panel in
+     the UI) to lengthen hover/click waits. (`safe` mode was retired —
+     legacy values are coerced to `balanced` automatically.)
   2. Re-run the video step.
   3. If it still fails, that tile may have a broken state in Flow — open it
      manually and generate the video by hand.
+
+---
+
+## "'Add to Prompt' button stayed disabled for 45s"
+
+**Symptom**
+- During image generation a single row fails with that exact error
+  string, or a Playwright trace showing the `Add to Prompt` button
+  in `disabled` state across many retries.
+
+**Cause**
+- Flow's backend hasn't finished processing the file you just uploaded.
+  The `+ → Add to Prompt` button stays disabled until upload processing
+  completes. Most uploads clear in well under a second; occasional slow
+  ones can take 30 s+ (large file, server hiccup, image format that
+  needs a server-side transcode).
+
+**Fix**
+- Re-run the row. The wait budget is already 45 s; if Flow needs longer
+  than that the upload likely failed and a retry will start fresh.
+- If a specific product fails repeatedly, drop a smaller or differently-
+  formatted reference image on that card and try again.
 
 ---
 

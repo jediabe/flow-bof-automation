@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 
-from .base import AIProvider, SYSTEM_PROMPT, format_user_prompt
+from .base import AIProvider, format_user_prompt, get_system_prompt
 
 
 class OpenAIProvider(AIProvider):
@@ -36,7 +36,7 @@ class OpenAIProvider(AIProvider):
             response_format={"type": "json_object"},
             temperature=0.4,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": get_system_prompt()},
                 {"role": "user", "content": format_user_prompt(product)},
             ],
         )

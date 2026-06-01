@@ -1,0 +1,13 @@
+id,product_name,image_path,image_prompt,video_prompt,status,flow_tile_id,flow_image_src,flow_media_id,tile_href,category,store,placement_type,prompt_override,notes
+01,"XBJ A5 Touch screen smart with 5G Wifi6 and Bluetooth 5.2, Autofocus, 180-Degree Horizontal Flip, Speaker, Support Native 1080p, Compact Portable for Meeting Home Theater",inputs/reference_images/5214d822_primary.jpg,Put a display setup for this product inside of a Currys store no price tags,"Slow handheld iPhone-style push-in toward the product. A hand enters the frame and gently taps the product once, as if the person recording is checking it on the shelf. Preserve the exact product appearance. Keep the environment stable and realistic. No morphing, no dramatic camera move, no cinematic lighting.",pending,,,,,auto,,,,"err: No 'Add to Prompt' element found by any strategy. Last error: Locator.wait_for: Timeout 3000ms exceeded.
+Call log:
+waiting for locator(""[aria-label*='Add to Prompt' i]"").first to be visible
+"
+02,LIVE LADIES WOMENS FLATFORM GLADIATOR PLATFORM CHUNKY SOLE STRAPPY SUMMER SANDALS SZ Footwear Comfort Stylish Walking Shoes Girl,inputs/reference_images/d3d2eff2_primary.jpg,Put a display setup for this product inside of a Schuh store no price tags,"Slow handheld iPhone-style push-in toward the product. A hand enters the frame and gently taps the product once, as if the person recording is checking it on the shelf. Preserve the exact product appearance. Keep the environment stable and realistic. No morphing, no dramatic camera move, no cinematic lighting.",pending,,,,,auto,,,,"err: No 'Add to Prompt' element found by any strategy. Last error: Locator.wait_for: Timeout 3000ms exceeded.
+Call log:
+waiting for locator(""[aria-label*='Add to Prompt' i]"").first to be visible
+"
+03,【Free Shipping】Adjustable Arm & Chest Trainer for Men | Home Workout Equipment | Arm Exercise Device | Shoulder & Forearm Strengthener | Portable Chest Expander Fitness Gear,inputs/reference_images/6acd3f5a_primary.jpg,Put a display setup for this product inside of a JD Sports store no price tags,"Slow handheld iPhone-style push-in toward the product. A hand enters the frame and gently taps the product once, as if the person recording is checking it on the shelf. Preserve the exact product appearance. Keep the environment stable and realistic. No morphing, no dramatic camera move, no cinematic lighting.",pending,,,,,auto,,,,"err: No 'Add to Prompt' element found by any strategy. Last error: Locator.wait_for: Timeout 3000ms exceeded.
+Call log:
+waiting for locator(""[aria-label*='Add to Prompt' i]"").first to be visible
+"

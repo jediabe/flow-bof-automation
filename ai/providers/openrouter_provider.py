@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from .base import AIProvider, SYSTEM_PROMPT, format_user_prompt
+from .base import AIProvider, format_user_prompt, get_system_prompt
 
 
 class OpenRouterProvider(AIProvider):
@@ -51,7 +51,7 @@ class OpenRouterProvider(AIProvider):
             model=model,
             temperature=0.4,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT + "\n\nReturn JSON only."},
+                {"role": "system", "content": get_system_prompt() + "\n\nReturn JSON only."},
                 {"role": "user", "content": format_user_prompt(product)},
             ],
         )

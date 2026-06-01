@@ -596,6 +596,35 @@ def perform_recorded_flow(
     logger.info("Clicked composer plus button")
 
     # --- 3. Click "Add to Prompt", then confirm the thumbnail attached ---
+    #
+    # The "Add to Prompt" button stays `disabled` until Flow's backend
+    # finishes processing the upload from step 1. Most products clear
+    # in under a second, but every now and then (large image, slow
+    # server response, image format that needs a transcode step) Flow
+    # holds the button disabled for several seconds. The default
+    # Playwright .click() timeout is `selector_timeout_ms` (15s), which
+    # is the same value across safe/balanced/fast — when that's not
+    # enough we get a clean failure with "element is not enabled"
+    # across ~30 retries.
+    #
+    # Fix: explicitly wait for the button to become enabled with a
+    # longer budget than the click timeout, so a slow upload doesn't
+    # take the whole batch with it. We also re-locate after the wait
+    # because Flow occasionally swaps the underlying element between
+    # the disabled and enabled state, which can stale-element the
+    # locator we had a moment ago.
+    add_to_prompt_enable_timeout_ms = max(selector_timeout_ms * 3, 45_000)
+    try:
+        expect(_locate_add_to_prompt(page)).to_be_enabled(
+            timeout=add_to_prompt_enable_timeout_ms
+        )
+    except (AssertionError, PlaywrightTimeoutError) as exc:
+        raise RecordedFlowError(
+            f"'Add to Prompt' button stayed disabled for "
+            f"{add_to_prompt_enable_timeout_ms / 1000:.0f}s — Flow is "
+            "probably still processing the uploaded image, or the "
+            "upload itself failed. Try the row again."
+        ) from exc
     _locate_add_to_prompt(page).click(timeout=selector_timeout_ms)
     try:
         expect(_locate_reference_thumbnail(page).first).to_be_visible(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from .base import AIProvider, SYSTEM_PROMPT, format_user_prompt
+from .base import AIProvider, format_user_prompt, get_system_prompt
 
 
 class AnthropicProvider(AIProvider):
@@ -36,7 +36,7 @@ class AnthropicProvider(AIProvider):
             temperature=0.4,
             # Anthropic has no native JSON mode; the system prompt
             # already demands strict JSON, but we double-reinforce.
-            system=SYSTEM_PROMPT + "\n\nReturn JSON only. No markdown.",
+            system=get_system_prompt() + "\n\nReturn JSON only. No markdown.",
             messages=[
                 {"role": "user", "content": format_user_prompt(product)},
             ],

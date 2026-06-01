@@ -52,6 +52,8 @@ class UserSettings:
     blanket_video_prompt: str = ""
     # "favorited_tiles" or "approved_rows". Empty falls back to env / default.
     video_source_mode: str = ""
+    # "US" or "UK". Empty falls back to env / default (US).
+    market: str = ""
 
 
 @dataclass
@@ -73,6 +75,7 @@ _SETTINGS_TO_ENV = {
     "use_blanket_video_prompt":"USE_BLANKET_VIDEO_PROMPT",
     "blanket_video_prompt":    "BLANKET_VIDEO_PROMPT",
     "video_source_mode":       "VIDEO_SOURCE_MODE",
+    "market":                  "MARKET",
 }
 _SECRETS_TO_ENV = {
     "openai_api_key":      "OPENAI_API_KEY",

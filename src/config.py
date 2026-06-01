@@ -76,6 +76,18 @@ class Settings:
     # "approved_rows": legacy path — iterate CSV rows that are
     #     image_approved + have a media_id. Kept for advanced use.
     video_source_mode: str
+    # Phase 5.3 — market selector. "US" uses the original AIBOF
+    # framework (DISPLAY METHOD / STORE TYPE / LIGHTING SENTENCE). "UK"
+    # uses the Apex Initiative UK retail prompt library — much simpler:
+    # one "Put a display setup for this product inside of a {Retailer}
+    # store no price tags" sentence, with the retailer chosen from a
+    # curated UK list (Boots, Sephora UK, Selfridges, Primark, etc.).
+    market: str
+
+
+MARKET_US = "US"
+MARKET_UK = "UK"
+VALID_MARKETS = {MARKET_US, MARKET_UK}
 
 
 VIDEO_SOURCE_MODE_FAVORITED_TILES = "favorited_tiles"
@@ -95,24 +107,21 @@ DEFAULT_BLANKET_VIDEO_PROMPT = (
 )
 
 
+# "safe" was retired -- it wasn't more reliable than balanced/fast, and
+# kept giving users false confidence ("If I'm in safe mode, why did it
+# fail?"). The actual reliability issues we hit (e.g. "Add to Prompt"
+# stays disabled while Flow processes the upload) are gated by
+# selector_timeout_ms, not the inter-action sleeps that mode controls.
+# Kept as a constant for back-compat: env var AUTOMATION_MODE=safe is
+# silently coerced to balanced in load_settings().
 AUTOMATION_MODE_SAFE = "safe"
 AUTOMATION_MODE_BALANCED = "balanced"
 AUTOMATION_MODE_FAST = "fast"
-VALID_AUTOMATION_MODES = {AUTOMATION_MODE_SAFE, AUTOMATION_MODE_BALANCED, AUTOMATION_MODE_FAST}
+VALID_AUTOMATION_MODES = {AUTOMATION_MODE_BALANCED, AUTOMATION_MODE_FAST}
 
 
 def _automation_mode_defaults(mode: str) -> dict[str, int]:
     """Per-mode timing defaults. Individual env vars override these."""
-    if mode == AUTOMATION_MODE_FAST:
-        return dict(
-            image_between_products_ms=100,
-            image_ui_settle_ms=80,
-            video_tile_settle_ms=300,
-            video_after_hover_ms=300,
-            video_after_menu_click_ms=200,
-            video_between_products_ms=400,
-            video_retry_count=2,
-        )
     if mode == AUTOMATION_MODE_BALANCED:
         return dict(
             image_between_products_ms=200,
@@ -123,15 +132,15 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
             video_between_products_ms=700,
             video_retry_count=3,
         )
-    # safe (default)
+    # fast (default — the previous "safe" defaults are gone)
     return dict(
-        image_between_products_ms=300,
-        image_ui_settle_ms=250,
-        video_tile_settle_ms=500,
-        video_after_hover_ms=500,
-        video_after_menu_click_ms=400,
-        video_between_products_ms=900,
-        video_retry_count=3,
+        image_between_products_ms=100,
+        image_ui_settle_ms=80,
+        video_tile_settle_ms=300,
+        video_after_hover_ms=300,
+        video_after_menu_click_ms=200,
+        video_between_products_ms=400,
+        video_retry_count=2,
     )
 
 
@@ -141,10 +150,13 @@ def load_settings() -> Settings:
         user_data_dir = REPO_ROOT / user_data_dir
 
     automation_mode = (
-        os.getenv("AUTOMATION_MODE") or AUTOMATION_MODE_SAFE
+        os.getenv("AUTOMATION_MODE") or AUTOMATION_MODE_FAST
     ).strip().lower()
+    # Migrate retired "safe" env value to balanced rather than crash.
+    if automation_mode == AUTOMATION_MODE_SAFE:
+        automation_mode = AUTOMATION_MODE_BALANCED
     if automation_mode not in VALID_AUTOMATION_MODES:
-        automation_mode = AUTOMATION_MODE_SAFE
+        automation_mode = AUTOMATION_MODE_FAST
     mode_defaults = _automation_mode_defaults(automation_mode)
 
     browser_mode = (os.getenv("BROWSER_MODE") or BROWSER_MODE_REMOTE_DEBUGGING).strip().lower()
@@ -219,6 +231,11 @@ def load_settings() -> Settings:
             if (os.getenv("VIDEO_SOURCE_MODE") or "").strip().lower()
             in VALID_VIDEO_SOURCE_MODES
             else VIDEO_SOURCE_MODE_FAVORITED_TILES
+        ),
+        market=(
+            (os.getenv("MARKET") or MARKET_US).strip().upper()
+            if (os.getenv("MARKET") or "").strip().upper() in VALID_MARKETS
+            else MARKET_US
         ),
     )
 

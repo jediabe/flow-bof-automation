@@ -94,6 +94,40 @@ from src.user_settings import (
 )
 from src import health as health_checks
 
+
+# Curated UK retailer list — exactly the retailers covered in the
+# UK_SYSTEM_PROMPT mapping table. The product card surfaces this as a
+# dropdown when MARKET=UK so the user can override the AI's pick (or
+# pre-seed before running AI prompts).
+UK_RETAILERS = [
+    "Boots",
+    "Sephora UK",
+    "Selfridges",
+    "Holland & Barrett",
+    "Primark",
+    "Schuh",
+    "JD Sports",
+    "IKEA",
+    "John Lewis",
+    "Currys",
+    "Argos",
+    "Smyths Toys",
+    "Pets at Home",
+    "Tesco",
+]
+
+
+def _active_market() -> str:
+    m = (os.environ.get("MARKET") or "US").strip().upper()
+    return m if m in ("US", "UK") else "US"
+
+
+def _prompt_mode_label() -> str:
+    """User-facing label for the active image-prompt style."""
+    if _active_market() == "UK":
+        return "UK Retail Store Display"
+    return "US Retail Editorial (AIBOF)"
+
 # Apply UI-saved settings/secrets to this process's os.environ before
 # any provider class reads from it.
 apply_user_settings_to_env()
@@ -122,19 +156,174 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 # ---------------------------------------------------------------------------
 
 
-def run_cli(args: list[str]) -> tuple[int, str]:
-    """Subprocess `python main.py <args>` and stream output into the page.
+import re
+import time
 
-    Returns (exit_code, full_output). Output is also returned so the
-    caller can stash it in session_state for the Logs page. Wraps the
-    subprocess in a wall-clock timer and prints a one-line summary on
-    completion (Phase 4 timing surfaces).
+
+# Friendly label for each CLI flag the UI invokes. Shown at the top of
+# the running-status placeholder instead of the raw argv.
+_CLI_FRIENDLY_LABELS = {
+    "--check-browser":                        "Checking browser connection",
+    "--validate-manifest":                    "Validating manifest",
+    "--load-manifest":                        "Loading manifest",
+    "--generate-images":                      "Generating product images",
+    "--sync-favorites":                       "Scanning favorited images",
+    "--generate-videos":                      "Generating videos from favorited images",
+    "--generate-videos-from-favorited-tiles": "Generating videos from favorited images",
+    "--generate-videos-from-approved-rows":   "Generating videos from approved rows (legacy)",
+    "--list-unmatched-favorites":             "Scanning favorited images",
+    "--capture-tiles":                        "Capturing tile IDs",
+    "--scan-images":                          "Scanning reference images",
+    "--list-status":                          "Listing run status",
+    "--bind-favorite":                        "Binding favorite to product",
+    "--debug-selectors":                      "Debugging selectors",
+}
+
+
+def _friendly_label_for(args: list[str]) -> str:
+    for a in args:
+        if a in _CLI_FRIENDLY_LABELS:
+            return _CLI_FRIENDLY_LABELS[a]
+    return "Running command"
+
+
+# Per-line patterns the runner uses to lift friendly progress events out
+# of the otherwise-noisy structured log. We deliberately ignore the
+# Playwright-tile-level chatter (hovered/clicked/menu visible) — those
+# are debug noise; the user only wants per-item progress.
+_PROGRESS_PATTERNS = [
+    # Video: favorited-tile mode.
+    (re.compile(r"Scanned (\d+) tile\(s\); (\d+) favorited image tile\(s\) eligible\."),
+     lambda m: f"Found {m.group(2)} favorited image{'s' if int(m.group(2)) != 1 else ''}."),
+    (re.compile(r"Animating (\d+) favorited tile\(s\)"),
+     lambda m: f"Submitting {m.group(1)} video{'s' if int(m.group(1)) != 1 else ''}..."),
+    (re.compile(r"--- \[(\d+)/(\d+)\] media_id=\S+"),
+     lambda m: f"Submitting video {m.group(1)} of {m.group(2)}..."),
+    (re.compile(r"Video submitted for media_id=\S+"),
+     lambda m: "Video submitted."),
+    (re.compile(r"Skipping media_id=\S+ \(already submitted"),
+     lambda m: "Skipped (already submitted)."),
+    (re.compile(r"Video failed for media_id=\S+"),
+     lambda m: "One video failed; continuing batch."),
+    # Image generation.
+    (re.compile(r"Processing (\d+) row\(s\)"),
+     lambda m: f"Generating {m.group(1)} image{'s' if int(m.group(1)) != 1 else ''}..."),
+    (re.compile(r"--- \[(\d+)/(\d+)\] id=\S+"),
+     lambda m: f"Submitting image {m.group(1)} of {m.group(2)}..."),
+    # Sync favorites.
+    (re.compile(r"Scanning Flow Labs gallery for favorited tiles"),
+     lambda m: "Scanning Flow Labs gallery..."),
+    (re.compile(r"Hearted (\d+) tile"),
+     lambda m: f"Hearted: {m.group(1)} tile(s)."),
+]
+
+
+def _parse_progress(line: str) -> str | None:
+    """If a line matches a known event, return a one-line friendly form."""
+    for pat, fmt in _PROGRESS_PATTERNS:
+        m = pat.search(line)
+        if m:
+            return fmt(m)
+    return None
+
+
+# Final-summary patterns: after the run completes, we re-scan the full
+# output for these and lift counts into the summary card.
+def _parse_command_summary(args: list[str], output: str, elapsed_s: float) -> dict[str, str]:
+    """Extract a clean summary dict for the UI summary card.
+
+    Best-effort: any value we can't pull from the logs is simply
+    omitted. Always returns at least 'Elapsed'.
     """
-    import time
+    summary: dict[str, str] = {"Elapsed": f"{elapsed_s:.1f}s"}
+
+    # Mode (safe / balanced / fast).
+    m = re.search(r"\(mode=(\w+),", output)
+    if m:
+        summary["Mode"] = m.group(1)
+
+    # --- Video: favorited-tile mode ----------------------------------
+    m = re.search(
+        r"Favorited-tile video batch done in [\d.]+s — "
+        r"(\d+) submitted, (\d+) failed, (\d+) skipped",
+        output,
+    )
+    if m:
+        summary["Videos submitted"] = m.group(1)
+        summary["Failed"] = m.group(2)
+        summary["Already submitted (skipped)"] = m.group(3)
+        if "Mode" in summary:
+            summary["Prompt"] = "Universal blanket prompt"
+    else:
+        # No final-summary line — fall back to counting per-line events.
+        # Useful when the run was interrupted.
+        scanned = re.search(r"Scanned \d+ tile\(s\); (\d+) favorited", output)
+        if scanned:
+            summary.setdefault("Favorited images found", scanned.group(1))
+
+    # --- Video: approved-rows (legacy) -------------------------------
+    m = re.search(
+        r"Video batch done in [\d.]+s — (\d+) submitted, (\d+) failed",
+        output,
+    )
+    if m and "Videos submitted" not in summary:
+        summary["Videos submitted"] = m.group(1)
+        summary["Failed"] = m.group(2)
+
+    # --- Image generation --------------------------------------------
+    m = re.search(
+        r"Image batch done in [\d.]+s — (\d+) submitted, (\d+) failed",
+        output,
+    )
+    if m:
+        summary["Images submitted"] = m.group(1)
+        summary["Failed"] = m.group(2)
+    # Also catch the per-row "skipped" counter if it appears.
+    skipped_imgs = len(re.findall(r"Skipping row id=\S+ \(", output))
+    if skipped_imgs:
+        summary["Skipped"] = str(skipped_imgs)
+
+    # --- Sync favorites ----------------------------------------------
+    m = re.search(r"Hearted (\d+) tile", output)
+    if m:
+        summary["Hearted in Flow"] = m.group(1)
+    m = re.search(r"Approved (\d+) row\(s\)", output)
+    if m:
+        summary["Approved"] = m.group(1)
+    m = re.search(r"(\d+) unmatched favorite", output)
+    if m:
+        summary["Need review"] = m.group(1)
+
+    return summary
+
+
+def _last_meaningful_lines(output: str, n: int = 10) -> list[str]:
+    """Pick the last N non-trivial log lines for the recap section."""
+    lines = [ln.rstrip() for ln in output.splitlines() if ln.strip()]
+    return lines[-n:]
+
+
+def run_cli(args: list[str]) -> tuple[int, str]:
+    """Subprocess ``python main.py <args>`` with a friendly UI.
+
+    Public contract is unchanged: returns ``(exit_code, full_output)``.
+    The behavior change is purely cosmetic — no streaming wall of text,
+    instead a one-line progress placeholder and a structured summary
+    card after completion. Raw stdout/stderr are tucked under a
+    collapsed "Show technical logs" expander.
+    """
     cmd = [sys.executable, str(ROOT / "main.py"), *args]
-    placeholder = st.empty()
-    lines: list[str] = [f"$ {' '.join(cmd)}\n"]
-    placeholder.code("".join(lines), language="text")
+    label = _friendly_label_for(args)
+
+    # Per-section state lives in the page DOM via st.empty placeholders.
+    # We wrap the subprocess in a st.spinner so Streamlit shows its
+    # running indicator immediately after click — bridges the visual
+    # gap between "page re-runs from top" and "status_box first paints"
+    # which is what users perceive as "the page turned white".
+    status_box = st.empty()
+    progress_box = st.empty()
+    status_box.info(f"**{label}** — starting…")
+
     cli_started = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -147,23 +336,68 @@ def run_cli(args: list[str]) -> tuple[int, str]:
             env=os.environ.copy(),
         )
     except FileNotFoundError as exc:
-        st.error(f"Could not start subprocess: {exc}")
+        status_box.error(f"Could not start subprocess: {exc}")
         return 1, str(exc)
 
     assert proc.stdout is not None
-    for line in iter(proc.stdout.readline, ""):
-        lines.append(line)
-        placeholder.code("".join(lines), language="text")
-    proc.wait()
+    raw_lines: list[str] = []
+    last_friendly = ""
+    with st.spinner(f"{label}…"):
+        for line in iter(proc.stdout.readline, ""):
+            raw_lines.append(line)
+            friendly = _parse_progress(line)
+            if friendly and friendly != last_friendly:
+                last_friendly = friendly
+                progress_box.write(f"• {friendly}")
+        proc.wait()
     elapsed = time.monotonic() - cli_started
-    output = "".join(lines)
+    output = "".join(raw_lines)
+
+    summary = _parse_command_summary(args, output, elapsed)
+
     if proc.returncode == 0:
-        st.success(f"Exit code: {proc.returncode}  ·  elapsed {elapsed:.1f}s")
+        status_box.success(f"**{label}** — done in {elapsed:.1f}s.")
     else:
-        st.warning(f"Exit code: {proc.returncode}  ·  elapsed {elapsed:.1f}s")
+        status_box.error(
+            f"**{label}** — failed (exit {proc.returncode}, "
+            f"elapsed {elapsed:.1f}s). See technical logs below."
+        )
+
+    # Render the summary as a single dense markdown line instead of
+    # st.metric tiles. The metric layout stretches its columns to fill
+    # the row, so with only 2-3 summary keys you get a wide expanse of
+    # whitespace either side. A pill-style caption packs the same info
+    # into one row with no padding.
+    if summary:
+        progress_box.markdown(
+            "  ·  ".join(f"**{k}:** {v}" for k, v in summary.items())
+        )
+    else:
+        # No parsed summary → keep the per-line progress events visible
+        # so the run isn't represented by a single success banner alone.
+        pass
+
+    # Recap: last few meaningful log lines, unfiltered. Only useful when
+    # our parser couldn't extract a structured summary — otherwise it's
+    # redundant with the technical-logs expander and adds vertical
+    # whitespace for no information gain.
+    if not summary:
+        tail = _last_meaningful_lines(output, 8)
+        if tail:
+            with st.expander("Recent activity", expanded=False):
+                st.code("\n".join(tail), language="text")
+
+    with st.expander("Show technical logs", expanded=False):
+        st.caption(f"`{' '.join(cmd)}`")
+        st.code(output or "(no output)", language="text")
+
     st.session_state["last_command_output"] = output
     st.session_state["last_command_args"] = args
     st.session_state["last_command_elapsed_s"] = elapsed
+    st.session_state["last_command_exit_code"] = proc.returncode
+    st.session_state["last_command_summary"] = summary
+    st.session_state["last_command_label"] = label
+    st.session_state["last_command_cmd"] = " ".join(cmd)
     return proc.returncode, output
 
 
@@ -279,6 +513,14 @@ def page_setup() -> None:
     except ValueError:
         prov_idx = list(KNOWN_PROVIDERS).index("manual")
 
+    # Resolve the saved market into a dropdown index.
+    saved_market = (
+        saved_settings.market or os.environ.get("MARKET") or "US"
+    ).strip().upper()
+    if saved_market not in ("US", "UK"):
+        saved_market = "US"
+    market_idx = ["US", "UK"].index(saved_market)
+
     with st.form("ai_settings_form"):
         provider_choice = st.selectbox(
             "AI Provider",
@@ -289,6 +531,21 @@ def page_setup() -> None:
                 "anthropic → uses ANTHROPIC_API_KEY.\n"
                 "openrouter → uses OPENROUTER_API_KEY.\n"
                 "manual → no API call; you write the prompts."
+            ),
+        )
+        market_choice = st.selectbox(
+            "Market",
+            ["US", "UK"],
+            index=market_idx,
+            help=(
+                "US → original AIBOF editorial framework (DISPLAY METHOD, "
+                "LIGHTING SENTENCE, big-box US retailers, no real brand "
+                "names).\n"
+                "UK → Apex Initiative UK retail prompt library — one short "
+                "sentence dropping the product into the right UK store "
+                "(Boots, Sephora UK, Selfridges, Primark, Currys, etc.).\n"
+                "Video prompts are the same in both markets (the universal "
+                "blanket prompt)."
             ),
         )
 
@@ -371,6 +628,12 @@ def page_setup() -> None:
             openrouter_model=openrouter_model.strip(),
             openrouter_site_url=openrouter_site_url.strip(),
             openrouter_app_name=openrouter_app_name.strip(),
+            market=market_choice,
+            # Preserve previously saved video knobs so saving the AI
+            # form doesn't clobber blanket-prompt and source-mode picks.
+            use_blanket_video_prompt=saved_settings.use_blanket_video_prompt,
+            blanket_video_prompt=saved_settings.blanket_video_prompt,
+            video_source_mode=saved_settings.video_source_mode,
         )
         new_secrets = UserSecrets(
             openai_api_key=openai_key.strip(),
@@ -418,6 +681,7 @@ def page_setup() -> None:
     st.subheader("Currently saved")
     st.dataframe(
         [
+            {"setting": "Market",                 "value": saved_settings.market or "(US default)"},
             {"setting": "AI Provider",            "value": saved_settings.ai_provider or "(empty)"},
             {"setting": "OpenAI model",           "value": saved_settings.openai_model or "(default)"},
             {"setting": "OpenAI API key",         "value": mask_key(saved_secrets.openai_api_key)},
@@ -884,6 +1148,16 @@ def _render_product_card(
     }.items():
         _ensure_session_field(f"pf_{fname}_{pid}", val)
 
+    # Show the active prompt mode + the selected retailer (if any) at
+    # the top of the card so the user can tell at a glance which store
+    # the next AI run will target.
+    if _active_market() == "UK":
+        selected = (product.store_environment or "").strip()
+        if selected:
+            st.caption(f"🇬🇧 UK Retail Store Display · **Retailer:** {selected}")
+        else:
+            st.caption("🇬🇧 UK Retail Store Display · **Retailer:** (let AI choose)")
+
     col_a, col_b = st.columns([2, 1])
     with col_a:
         st.text_input("Product Name", key=f"pf_name_{pid}")
@@ -973,7 +1247,34 @@ def _render_product_card(
     cc2.text_input("Caption", key=f"pf_cap_{pid}")
     cc3, cc4, cc5 = st.columns(3)
     cc3.text_input("Category",          key=f"pf_cat_{pid}")
-    cc4.text_input("Store Environment", key=f"pf_store_{pid}")
+    # When MARKET=UK, "Store Environment" becomes a curated dropdown of
+    # the 14 UK retailers covered by the prompt library — saves the
+    # user from typing exact spelling and serves as a manual override
+    # of whatever the AI picked. Empty option = "let the AI choose".
+    if _active_market() == "UK":
+        current_store = (st.session_state.get(f"pf_store_{pid}") or "").strip()
+        options = ["(let AI choose)", *UK_RETAILERS]
+        try:
+            idx = options.index(current_store) if current_store in options else 0
+        except ValueError:
+            idx = 0
+        picked = cc4.selectbox(
+            "UK Retailer (override)",
+            options,
+            index=idx,
+            key=f"pf_store_select_{pid}",
+            help=(
+                "Pick a UK retailer to force the AI prompt onto a "
+                "specific store, or leave on '(let AI choose)' to let "
+                "the model pick based on the product category."
+            ),
+        )
+        # Mirror selection into the underlying free-text key so the
+        # save handler (which reads from pf_store_{pid}) sees the right
+        # value with no other code changes.
+        st.session_state[f"pf_store_{pid}"] = "" if picked.startswith("(") else picked
+    else:
+        cc4.text_input("Store Environment", key=f"pf_store_{pid}")
     cc5.text_input("Placement Type",    key=f"pf_place_{pid}")
 
     if product.warnings:
@@ -2809,11 +3110,12 @@ def _render_unmatched_favorites_section(batch_id: str) -> None:
     if not items:
         return
 
-    st.markdown(f"#### Unmatched favorited images ({len(items)})")
+    st.markdown(f"#### Favorited images that need review ({len(items)})")
     st.caption(
-        "Favorited tiles whose media_id didn't match any product row. "
-        "Typically you regenerated a variant in Flow manually. Pick a "
-        "product to bind each one to — its video_prompt will be used."
+        "These favorited tiles weren't matched to a product in your "
+        "batch — most often because you regenerated a variant in Flow "
+        "by hand. Pick a product to attach each one to. Video "
+        "generation can also animate them directly without binding."
     )
 
     products = load_batch_products(batch_id)
@@ -2997,8 +3299,9 @@ def _render_blanket_video_prompt_panel() -> None:
 def page_bof_batch_builder() -> None:
     st.title("BOF Batch Builder")
     st.caption(
-        "End-to-end batch authoring on one page. Advanced controls are "
-        "in the sidebar's Advanced expander."
+        f"End-to-end batch authoring on one page. "
+        f"**Prompt mode:** {_prompt_mode_label()} "
+        f"(change in **Setup**)."
     )
 
     if not _ai_provider_is_configured():
@@ -3052,18 +3355,26 @@ def page_bof_batch_builder() -> None:
     #     for THIS Streamlit process. Affects every subprocess we spawn
     #     from now on since they inherit env via os.environ.copy(). ---
     with st.expander("Automation speed", expanded=False):
-        modes = ["safe", "balanced", "fast"]
-        current_mode = (os.environ.get("AUTOMATION_MODE") or "safe").lower()
+        # "safe" was retired -- the per-mode sleep deltas didn't change
+        # reliability for any of the failure modes we saw in practice
+        # (the real culprit is selector_timeout_ms, which is the same
+        # value across modes). Legacy AUTOMATION_MODE=safe env values
+        # are coerced to balanced in src/config.py:load_settings.
+        modes = ["fast", "balanced"]
+        current_mode = (os.environ.get("AUTOMATION_MODE") or "fast").lower()
+        if current_mode == "safe":
+            current_mode = "balanced"
         if current_mode not in modes:
-            current_mode = "safe"
+            current_mode = "fast"
         new_mode = st.radio(
             "Mode",
             modes,
             index=modes.index(current_mode),
             horizontal=True,
             help=(
-                "safe = reliable (default). balanced = daily-use. "
-                "fast = shortest waits + fewer retries."
+                "fast = default. Shortest waits + fewer retries.  "
+                "balanced = a bit slower; use only if you're seeing UI "
+                "race conditions on a sluggish machine."
             ),
             key="bof_automation_mode",
         )
@@ -3246,26 +3557,40 @@ def page_bof_batch_builder() -> None:
         run_cli(["--generate-images", "--limit", str(int(img_limit))])
 
     # =====================================================================
-    # STEP 5 — Review favorites
+    # STEP 5 — Pick winners
     # =====================================================================
     st.divider()
-    st.header("5. Review images")
+    st.header("5. Pick winners")
     st.info(
-        "Open your real Chrome window (the one connected via the debug "
-        "port) and heart/favorite the images you want to animate. Then "
-        "click below."
+        "Review the generated images in Flow. Heart/favorite the "
+        "images you want to turn into videos. Then click **Scan "
+        "Favorites** so the app picks them up."
     )
-    if st.button("Sync Favorited Images", type="primary", key="bof_sync"):
+    pw1, pw2 = st.columns([1, 2])
+    if pw1.button(
+        "Open Flow",
+        key="bof_open_flow",
+        help="Opens https://labs.google/flow in a new tab.",
+    ):
+        st.markdown(
+            "<script>window.open('https://labs.google/flow','_blank');</script>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "If your browser blocked the popup, open "
+            "[labs.google/flow](https://labs.google/flow) manually."
+        )
+    if pw2.button("Scan Favorites", type="primary", key="bof_sync"):
         run_cli(["--sync-favorites"])
 
     csv_total, csv_counts = csv_status_counts()
     if csv_total > 0:
         ca, cb, cc = st.columns(3)
-        ca.metric("Approved", csv_counts.get(STATUS_IMAGE_APPROVED, 0))
-        cb.metric("Awaiting review", csv_counts.get(STATUS_IMAGE_SUBMITTED, 0))
-        cc.metric("Rejected", csv_counts.get(STATUS_IMAGE_REJECTED, 0))
+        ca.metric("Picked (favorited)", csv_counts.get(STATUS_IMAGE_APPROVED, 0))
+        cb.metric("Awaiting your review", csv_counts.get(STATUS_IMAGE_SUBMITTED, 0))
+        cc.metric("Skipped", csv_counts.get(STATUS_IMAGE_REJECTED, 0))
 
-    # ---- Unmatched Favorited Images ----
+    # ---- Favorited images that need review (was "Unmatched Favorited Images") ----
     _render_unmatched_favorites_section(batch_id)
 
     # =====================================================================
@@ -3329,82 +3654,183 @@ def page_bof_batch_builder() -> None:
     if include_already:
         btn_args.append("--include-already-submitted")
     if vc2.button(
-        f"Generate Videos for Favorited Images (up to {vid_limit})",
+        f"Generate Videos from Favorited Images (up to {vid_limit})",
         type="primary",
         key="bof_gen_videos",
     ):
         run_cli(btn_args)
 
-    # =====================================================================
-    # Advanced — collapsed by default
-    # =====================================================================
+    # Advanced controls + raw stdout/stderr live on the dedicated
+    # **Advanced / Logs** sidebar entry. Everything that used to be
+    # collapsed inline here (check-browser, validate-manifest,
+    # load-manifest-fresh, sync-favorites legacy, generate-videos from
+    # approved rows) is now one click away in that page, with the same
+    # button labels.
     st.divider()
-    with st.expander("Advanced — raw pipeline commands", expanded=False):
-        st.caption(
-            "Reach for these when something looks off. Each button "
-            "subprocesses the matching `python main.py` invocation."
+    st.caption(
+        "Need to inspect raw logs or run a diagnostic? Open "
+        "**Advanced / Logs** in the sidebar."
+    )
+
+
+def page_advanced_logs() -> None:
+    """Debug surface: latest CLI run + raw CLI buttons + legacy pages.
+
+    Three sections:
+      1. Most recent command — exit code, elapsed, full stdout/stderr.
+      2. Raw CLI buttons — every internal --flag the BOF page hides.
+      3. Legacy pages — direct links to the pre-cleanup multi-page UI
+         and the old logs file browser.
+    """
+    st.title("Advanced / Logs")
+    st.caption(
+        "Everything below is here for debugging. The normal workflow "
+        "lives entirely on **BOF Batch Builder**."
+    )
+
+    # --- Latest command run --------------------------------------------
+    st.subheader("Most recent command")
+    output = st.session_state.get("last_command_output")
+    if not output:
+        st.info(
+            "No commands have been run in this session yet. Buttons on "
+            "BOF Batch Builder land their output here."
         )
-        a1, a2 = st.columns(2)
-        if a1.button("Check Browser", key="bof_adv_check"):
-            run_cli(["--check-browser"])
-        if a2.button("Validate Manifest", key="bof_adv_validate"):
-            run_cli(["--validate-manifest", str(MANIFEST_PATH)])
-        a3, a4 = st.columns(2)
-        if a3.button(
-            "Load Manifest Fresh",
-            key="bof_adv_load",
-            disabled=not st.checkbox(
-                "confirm fresh", value=False, key="bof_adv_confirm_fresh"
-            ),
-        ):
-            run_cli(["--load-manifest", str(MANIFEST_PATH), "--fresh"])
-        if a4.button("Export Manifest (no validate / no load)", key="bof_adv_export"):
-            export_manifest(batch_id, SETTINGS, sync_to_inputs=True)
-            st.success("Manifest exported.")
-        st.markdown("**Per-step generations**")
-        a5, a6, a7 = st.columns(3)
-        if a5.button("Generate Images Only", key="bof_adv_genimg"):
-            run_cli(["--generate-images", "--limit", str(int(img_limit))])
-        if a6.button("Sync Favorites Only", key="bof_adv_sync"):
-            run_cli(["--sync-favorites"])
-        if a7.button("Generate Videos Only", key="bof_adv_genvid"):
-            run_cli(["--generate-videos", "--limit", str(int(vid_limit))])
-        st.markdown("**Legacy video paths**")
-        st.caption(
-            "The main button above iterates favorited Flow tiles "
-            "directly (no CSV binding required). The button below "
-            "iterates CSV rows that hit status=image_approved + have a "
-            "media_id — useful if you want product binding to drive "
-            "video submission instead of ❤️ state."
-        )
-        if st.button(
-            "Generate Videos from Approved Product Rows",
-            key="bof_adv_genvid_rows",
-        ):
-            run_cli([
-                "--generate-videos-from-approved-rows",
-                "--limit", str(int(vid_limit)),
-            ])
-        st.markdown("**Debug**")
-        st.caption(
-            "Open the **Logs** entry in the sidebar's Advanced section "
-            "for raw stdout / stderr and error screenshots."
-        )
+    else:
+        label = st.session_state.get("last_command_label", "Last command")
+        exit_code = st.session_state.get("last_command_exit_code", 0)
+        elapsed = st.session_state.get("last_command_elapsed_s", 0.0)
+        cmd = st.session_state.get("last_command_cmd", "")
+        summary = st.session_state.get("last_command_summary", {}) or {}
+
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Command", label)
+        col_b.metric("Exit code", str(exit_code))
+        col_c.metric("Elapsed", f"{elapsed:.1f}s")
+
+        if summary:
+            st.write("**Parsed summary:**")
+            st.dataframe(
+                [{"metric": k, "value": v} for k, v in summary.items()],
+                hide_index=True,
+                use_container_width=True,
+            )
+        st.caption(f"`{cmd}`")
+        st.code(output, language="text")
+
+    st.divider()
+
+    # --- Raw CLI buttons -----------------------------------------------
+    st.subheader("Diagnostic commands")
+    st.caption("These call `python main.py …` directly inside the container.")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Check Browser", key="adv_check_browser"):
+        run_cli(["--check-browser"])
+    if c2.button("Validate Manifest", key="adv_validate_manifest"):
+        run_cli(["--validate-manifest", str(MANIFEST_PATH)])
+    if c3.button("Load Manifest Fresh", key="adv_load_manifest_fresh",
+                 disabled=not st.checkbox(
+                     "Confirm fresh load (clears products.csv)",
+                     value=False, key="adv_confirm_fresh",
+                 )):
+        run_cli(["--load-manifest", str(MANIFEST_PATH), "--fresh"])
+
+    c4, c5, c6 = st.columns(3)
+    if c4.button("Sync Favorites (legacy)", key="adv_sync_legacy",
+                 help=(
+                     "Updates CSV row statuses by matching Flow ❤️ to "
+                     "captured media_ids. The main 'Scan Favorites' button "
+                     "above uses the same command but presents results "
+                     "differently."
+                 )):
+        run_cli(["--sync-favorites"])
+    if c5.button("Generate Videos from Approved Rows (legacy)", key="adv_gen_videos_rows",
+                 help=(
+                     "Iterates CSV rows with status=image_approved + a "
+                     "captured media_id. The main 'Generate Videos' button "
+                     "iterates Flow's ❤️ tiles directly and doesn't need "
+                     "this legacy path."
+                 )):
+        run_cli(["--generate-videos-from-approved-rows", "--limit", "30"])
+    if c6.button("List Unmatched Favorites", key="adv_list_unmatched"):
+        run_cli(["--list-unmatched-favorites"])
+
+    st.divider()
+
+    # --- Log files on disk ---------------------------------------------
+    st.subheader("Log files on disk")
+    if LOGS_DIR.exists():
+        log_files = sorted(LOGS_DIR.glob("*.log"), reverse=True)
+        if log_files:
+            selected = st.selectbox(
+                "Pick a log file", [f.name for f in log_files],
+                key="adv_logfile_pick",
+            )
+            chosen = next((f for f in log_files if f.name == selected), None)
+            if chosen:
+                try:
+                    text = chosen.read_text(encoding="utf-8")
+                except OSError as exc:
+                    st.error(f"Could not read {chosen}: {exc}")
+                else:
+                    st.caption(f"{chosen}  ·  {len(text):,} chars")
+                    st.code(text[-50_000:], language="text")
+        else:
+            st.info("No log files yet.")
+    else:
+        st.info(f"Logs dir does not exist: {LOGS_DIR}")
+
+    # Error screenshots (if any).
+    if LOGS_DIR.exists():
+        screenshots = sorted(LOGS_DIR.glob("*.png"), reverse=True)
+        if screenshots:
+            with st.expander(f"Error screenshots ({len(screenshots)})", expanded=False):
+                for shot in screenshots[:12]:
+                    st.caption(shot.name)
+                    st.image(str(shot), use_container_width=True)
+
+    st.divider()
+
+    # --- Pointers to the old multi-page UI -----------------------------
+    st.subheader("Legacy pages")
+    st.caption(
+        "The original page-by-page UI is still reachable if you need it. "
+        "These do exactly what the BOF Batch Builder sections do — kept "
+        "around for debugging unusual cases."
+    )
+    legacy_targets = {
+        "Original Dashboard":         "Original Dashboard",
+        "AI Product Intake (legacy)": "AI Product Intake (legacy)",
+        "Reference Images (legacy)":  "Reference Images (legacy)",
+        "Manifest Builder (legacy)":  "Manifest Builder (legacy)",
+        "Batch Controls (legacy)":    "Batch Controls (legacy)",
+        "Old per-step pages":         "1. Dashboard",
+        "Old Settings page":          "Settings",
+        "Old Logs page":              "7. Logs",
+    }
+    cols = st.columns(2)
+    for i, (label, target) in enumerate(legacy_targets.items()):
+        if cols[i % 2].button(label, key=f"adv_goto_{target}"):
+            st.session_state["force_page"] = target
+            st.rerun()
 
 
 GUIDED_PAGES = {
-    "Setup":                page_setup,
     "BOF Batch Builder":    page_bof_batch_builder,
-    "1. Dashboard":         page_guided_dashboard,
-    "2. Product Intake":    page_product_intake,
-    "3. Images":            page_images,
-    "4. AI Prompts":        page_ai_prompts,
-    "5. Export Manifest":   page_export_manifest,
-    "6. Flow Batch Run":    page_flow_batch_run,
-    "7. Logs":              page_logs,
+    "Setup":                page_setup,
+    "Advanced / Logs":      page_advanced_logs,
 }
 
+# Old per-step pages kept reachable for debug, but no longer in the
+# primary sidebar list. Reached via Advanced / Logs → Legacy pages.
 ADVANCED_PAGES = {
+    "1. Dashboard":               page_guided_dashboard,
+    "2. Product Intake":          page_product_intake,
+    "3. Images":                  page_images,
+    "4. AI Prompts":              page_ai_prompts,
+    "5. Export Manifest":         page_export_manifest,
+    "6. Flow Batch Run":          page_flow_batch_run,
+    "7. Logs":                    page_logs,
     "AI Product Intake (legacy)": page_ai_intake,
     "Reference Images (legacy)":  page_reference_images,
     "Manifest Builder (legacy)":  page_manifest,
@@ -3444,16 +3870,18 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("### Flow BOF Automation")
-        st.caption("Phase 3 — guided workflow")
         choice = st.radio(
             "Workflow",
             list(GUIDED_PAGES.keys()),
             key="sidebar_choice",
             label_visibility="collapsed",
         )
-        with st.expander("Advanced / legacy", expanded=False):
+        # Legacy per-step pages remain reachable but live inside a
+        # collapsed expander labelled "Legacy / debug pages" so the
+        # primary sidebar stays at three items as the spec requires.
+        with st.expander("Legacy / debug pages", expanded=False):
             adv = st.radio(
-                "Advanced",
+                "Legacy",
                 ["(none)", *ADVANCED_PAGES.keys()],
                 key="sidebar_advanced_choice",
                 label_visibility="collapsed",
@@ -3462,8 +3890,8 @@ def main() -> None:
                 choice = adv
         st.divider()
         st.caption(
-            "Long-running commands stream output into the page; keep "
-            "this tab focused while they run."
+            "Keep this tab focused while a command runs. Raw logs are "
+            "hidden behind 'Show technical logs' on each run."
         )
 
     PAGES[choice]()
