@@ -50,3 +50,7 @@ backups/
 # Windows noise files
 Thumbs.db
 Desktop.ini
+
+inputs/products.csv.bak.*
+
+inputs/products.csv.bak.*
