@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 from pathlib import Path
@@ -302,11 +303,165 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "rows."
         ),
     )
+    # ----- Agent job entrypoints (Phase 1 of SaaS migration). ------------
+    # These are deliberately NOT inside the mutually-exclusive group so a
+    # future SaaS dispatcher can call this CLI with just these flags and
+    # nothing else. main() guards against mixing them with the other
+    # verbs explicitly.
+    parser.add_argument(
+        "--agent-job",
+        type=str,
+        default=None,
+        metavar="JOB_TYPE",
+        help=(
+            "Run a single local agent job (e.g. --agent-job health_check). "
+            "Prints a JSON envelope to stdout, sends logs to stderr, exits "
+            "0 on succeeded / 1 on failed. See docs/JOB_PROTOCOL.md."
+        ),
+    )
+    parser.add_argument(
+        "--agent-job-json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Load a full job envelope from PATH (JSON file) and dispatch "
+            "it. Use this instead of --agent-job when the caller needs to "
+            "provide a non-empty payload."
+        ),
+    )
+    parser.add_argument(
+        "--agent-progress-jsonl",
+        action="store_true",
+        help=(
+            "When running an --agent-job / --agent-job-json command, "
+            "emit progress events as JSON lines to stderr while the job "
+            "runs. Stdout still receives exactly one final JSON envelope. "
+            "Useful for SaaS agent runners that want live updates."
+        ),
+    )
+    parser.add_argument(
+        "--agent-server",
+        action="store_true",
+        help=(
+            "Boot the local agent HTTP API (FastAPI + uvicorn) on "
+            "127.0.0.1:9444 by default. Env knobs: AGENT_API_HOST, "
+            "AGENT_API_PORT, AGENT_API_TOKEN. See docs/LOCAL_AGENT_HTTP_API.md."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _run_agent_job(args: argparse.Namespace) -> int:
+    """Phase-1 agent dispatcher.
+
+    Builds a job envelope from either --agent-job or --agent-job-json,
+    runs it through src.agent_api.handle_agent_job, prints exactly one
+    JSON object to stdout, and returns 0 on succeeded / 1 on failed.
+
+    Logging goes to stderr so the stdout stream is parseable by callers.
+    Does NOT call ensure_dirs / setup_logging — health_check must not
+    mutate filesystem state, and a broken settings file shouldn't keep
+    the health check from running.
+    """
+    import json
+
+    logging.basicConfig(
+        level=logging.WARNING,
+        stream=sys.stderr,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
+    )
+    logger = logging.getLogger("agent")
+
+    from src.agent_api import PROTOCOL_VERSION, handle_agent_job
+
+    if args.agent_job_json:
+        try:
+            with open(args.agent_job_json, "r", encoding="utf-8") as f:
+                job = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            envelope = {
+                "protocol_version": PROTOCOL_VERSION,
+                "job_id":           "",
+                "job_type":         "",
+                "status":           "failed",
+                "result":           None,
+                "error": {
+                    "code":    "BAD_ENVELOPE",
+                    "message": (
+                        f"Could not read job envelope from "
+                        f"{args.agent_job_json}: {exc}"
+                    ),
+                    "details": {},
+                },
+            }
+            print(json.dumps(envelope), file=sys.stdout)
+            return 1
+        if not isinstance(job, dict):
+            envelope = {
+                "protocol_version": PROTOCOL_VERSION,
+                "job_id":           "",
+                "job_type":         "",
+                "status":           "failed",
+                "result":           None,
+                "error": {
+                    "code":    "BAD_ENVELOPE",
+                    "message": (
+                        f"Job file must contain a JSON object; got "
+                        f"{type(job).__name__}"
+                    ),
+                    "details": {},
+                },
+            }
+            print(json.dumps(envelope), file=sys.stdout)
+            return 1
+    else:
+        # --agent-job <type>: build a minimal envelope with empty payload.
+        job = {
+            "protocol_version": PROTOCOL_VERSION,
+            "job_id":           "local-cli",
+            "job_type":         args.agent_job,
+            "payload":          {},
+        }
+
+    # If the caller asked for progress, build a callback that emits one
+    # JSON line per event to stderr. Stdout stays reserved for the final
+    # envelope so the contract is unchanged.
+    progress_callback = None
+    if args.agent_progress_jsonl:
+        def _emit_jsonl(event: dict) -> None:
+            try:
+                sys.stderr.write(json.dumps(event) + "\n")
+                sys.stderr.flush()
+            except Exception:  # noqa: BLE001
+                # Progress is informational. A broken stderr must not
+                # take the whole job down.
+                pass
+        progress_callback = _emit_jsonl
+
+    result = handle_agent_job(job, logger=logger, progress_callback=progress_callback)
+    print(json.dumps(result), file=sys.stdout)
+    return 0 if result.get("status") == "succeeded" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # Agent-job dispatch happens BEFORE load_settings / ensure_dirs /
+    # setup_logging — the job handler is supposed to describe a broken
+    # environment, not be killed by one, and it must not write to the
+    # filesystem.
+    if args.agent_job or args.agent_job_json:
+        return _run_agent_job(args)
+
+    # Agent HTTP server: long-lived process. Same early-return rule as
+    # --agent-job — we want the server to come up even when the project
+    # state is half-set, so the dashboard can call /health and find out.
+    if args.agent_server:
+        from src.agent_server import run as _run_agent_server
+        return _run_agent_server()
+
     settings = load_settings()
     ensure_dirs(settings)
     logger = setup_logging(settings)

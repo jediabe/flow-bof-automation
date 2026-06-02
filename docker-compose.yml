@@ -142,3 +142,55 @@ services:
     volumes:
       - .:/app
     restart: unless-stopped
+
+  # Phase 2 — local agent HTTP API. Same image as `app` / `ui`, just a
+  # different command. Port published on 127.0.0.1 only so it isn't
+  # reachable from outside the host. NOT started by default — opt in
+  # with `docker compose --profile agent up -d agent` or simply run
+  # `docker compose run --rm -p 127.0.0.1:9444:9444 app python main.py
+  # --agent-server` ad-hoc. The agent and the legacy app/ui share the
+  # same Chrome session via cdp-proxy, so they can run side-by-side
+  # without conflict — they just shouldn't drive Chrome at the same
+  # time.
+  agent:
+    profiles: ["agent"]
+    build: .
+    image: flow-bof-automation:latest
+    container_name: flow-bof-agent
+    working_dir: /app
+    command: python main.py --agent-server
+    ports:
+      - "127.0.0.1:9444:9444"
+    depends_on:
+      - cdp-proxy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      BROWSER_MODE: remote_debugging
+      CHROME_CDP_URL: http://cdp-proxy:9333
+      FLOW_LABS_URL: "${FLOW_LABS_URL:-https://labs.google/flow}"
+      AGENT_API_HOST: "${AGENT_API_HOST:-0.0.0.0}"  # 0.0.0.0 inside the
+                                                     # container; host
+                                                     # binding above
+                                                     # keeps it local
+      AGENT_API_PORT: "${AGENT_API_PORT:-9444}"
+      AGENT_API_TOKEN: "${AGENT_API_TOKEN:-}"
+      GENERATION_TIMEOUT_SECONDS: "${GENERATION_TIMEOUT_SECONDS:-180}"
+      SELECTOR_TIMEOUT_MS: "${SELECTOR_TIMEOUT_MS:-15000}"
+      SLOW_MO_MS: "${SLOW_MO_MS:-0}"
+      VERIFY_GENERATION_STARTED: "${VERIFY_GENERATION_STARTED:-false}"
+      CAPTURE_TIMEOUT_SECONDS: "${CAPTURE_TIMEOUT_SECONDS:-60}"
+      AI_PROVIDER: "${AI_PROVIDER:-manual}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-anthropic/claude-3.5-sonnet}"
+      AUTOMATION_MODE: "${AUTOMATION_MODE:-fast}"
+      DEBUG_SCREENSHOTS: "${DEBUG_SCREENSHOTS:-false}"
+      IMAGE_FAST_SUBMIT_MODE: "${IMAGE_FAST_SUBMIT_MODE:-true}"
+      IMAGE_SIBLING_WINDOW_MS: "${IMAGE_SIBLING_WINDOW_MS:-2000}"
+    volumes:
+      - .:/app
+    restart: unless-stopped

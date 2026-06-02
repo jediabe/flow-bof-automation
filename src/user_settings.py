@@ -54,6 +54,12 @@ class UserSettings:
     video_source_mode: str = ""
     # "US" or "UK". Empty falls back to env / default (US).
     market: str = ""
+    # Phase-2b: Streamlit execution mode for agent-supported actions.
+    # "cli" (default)        — subprocess `python main.py …` (legacy).
+    # "http"                  — call the local agent HTTP API on AGENT_BASE_URL.
+    agent_execution_mode: str = ""
+    # Where to find the agent HTTP API. Empty → http://127.0.0.1:9444.
+    agent_base_url: str = ""
 
 
 @dataclass
@@ -61,6 +67,10 @@ class UserSecrets:
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     openrouter_api_key: str = ""
+    # Phase-2b: bearer token the UI sends to the local agent HTTP API
+    # when AGENT_EXECUTION_MODE=http. Optional — only required when the
+    # agent itself was started with AGENT_API_TOKEN set.
+    agent_api_token: str = ""
 
 
 # Map UserSettings/UserSecrets field name -> env var name. Used by
@@ -76,11 +86,14 @@ _SETTINGS_TO_ENV = {
     "blanket_video_prompt":    "BLANKET_VIDEO_PROMPT",
     "video_source_mode":       "VIDEO_SOURCE_MODE",
     "market":                  "MARKET",
+    "agent_execution_mode":    "AGENT_EXECUTION_MODE",
+    "agent_base_url":          "AGENT_BASE_URL",
 }
 _SECRETS_TO_ENV = {
     "openai_api_key":      "OPENAI_API_KEY",
     "anthropic_api_key":   "ANTHROPIC_API_KEY",
     "openrouter_api_key":  "OPENROUTER_API_KEY",
+    "agent_api_token":     "AGENT_API_TOKEN",
 }
 
 
