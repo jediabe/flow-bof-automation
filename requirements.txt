@@ -20,3 +20,8 @@ streamlit-paste-button==0.1.2
 # Read Kalodata's .xlsx exports (LIST_PRODUCT sheet) on the
 # Product Intake page.
 openpyxl==3.1.5
+# Phase-2 local agent HTTP API. Only loaded when running
+# `python main.py --agent-server`; the Streamlit / CLI paths don't
+# import this. Pin range to avoid surprises across the FastAPI 0.x line.
+fastapi>=0.110,<1.0
+uvicorn>=0.27,<1.0

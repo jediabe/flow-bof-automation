@@ -303,15 +303,292 @@ def _last_meaningful_lines(output: str, n: int = 10) -> list[str]:
     return lines[-n:]
 
 
+# ===========================================================================
+# Phase-2b: optional HTTP execution mode against the local agent server.
+#
+# Set AGENT_EXECUTION_MODE=http in Setup to route SUPPORTED commands at the
+# /jobs/run-stream endpoint instead of subprocessing main.py. The two
+# transports return the same shape ((exit_code, output)), so the rest of
+# the UI is transport-agnostic.
+#
+# Commands that aren't a 1:1 match for an agent job (manifest mutations,
+# legacy CSV sync) always stay on the CLI path even in HTTP mode.
+# ===========================================================================
+
+
+def _agent_execution_mode() -> str:
+    """'http' or 'cli'. Unknown values fall through to 'cli'."""
+    raw = (os.environ.get("AGENT_EXECUTION_MODE") or "cli").strip().lower()
+    return "http" if raw == "http" else "cli"
+
+
+def _agent_base_url() -> str:
+    raw = (os.environ.get("AGENT_BASE_URL") or "http://127.0.0.1:9444").strip()
+    return raw.rstrip("/") or "http://127.0.0.1:9444"
+
+
+def _agent_http_headers() -> dict:
+    token = (os.environ.get("AGENT_API_TOKEN") or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def agent_http_health(timeout: float = 5.0) -> tuple[bool, dict]:
+    """Cheap reachability probe — calls GET /health on the agent.
+
+    Returns (reachable, payload). On any transport error, reachable is
+    False and payload carries the error so the UI can render it.
+    """
+    import httpx
+    try:
+        r = httpx.get(
+            f"{_agent_base_url()}/health",
+            headers=_agent_http_headers(),
+            timeout=timeout,
+        )
+        if r.status_code == 200:
+            return True, r.json()
+        return False, {
+            "http_status": r.status_code,
+            "body":        (r.text or "")[:400],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return False, {
+            "error":   f"{type(exc).__name__}: {exc}",
+            "url":     f"{_agent_base_url()}/health",
+        }
+
+
+# CLI args → agent job envelope. Only the subset we've migrated:
+# --check-browser, --generate-videos, --list-unmatched-favorites.
+# Other args return None so run_cli stays on the subprocess path.
+def _args_to_agent_job(args: list[str]) -> dict | None:
+    if not args:
+        return None
+    first = args[0]
+
+    if first == "--check-browser":
+        return {
+            "job_type": "health_check",
+            "payload":  {},
+        }
+
+    if first in ("--list-unmatched-favorites",):
+        # Read-only Flow scan — same as the agent's scan_favorited_images,
+        # which is what the user actually wants when clicking Scan
+        # Favorites from the BOF page.
+        return {
+            "job_type": "scan_favorited_images",
+            "payload":  {"limit": 100,
+                         "include_non_favorites": False,
+                         "include_videos": False},
+        }
+
+    if first == "--generate-videos":
+        # --generate-videos --limit N [--include-already-submitted]
+        limit = 30
+        include_already = False
+        i = 1
+        while i < len(args):
+            if args[i] == "--limit" and i + 1 < len(args):
+                try:
+                    limit = int(args[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            elif args[i] == "--include-already-submitted":
+                include_already = True
+                i += 1
+            else:
+                # Unrecognized extra arg — stay safe, drop to CLI.
+                return None
+        return {
+            "job_type": "generate_flow_videos_from_favorites",
+            "payload":  {
+                "limit": limit,
+                "include_already_submitted": include_already,
+            },
+        }
+
+    return None
+
+
+def _summary_from_envelope(envelope: dict) -> dict[str, str]:
+    """Lift the friendly summary fields from a successful agent envelope.
+
+    The envelope already has structured counts in result.<...>; no log
+    regexing needed.
+    """
+    summary: dict[str, str] = {}
+    result = envelope.get("result") or {}
+    elapsed = result.get("elapsed_seconds")
+    if elapsed is not None:
+        summary["Elapsed"] = f"{float(elapsed):.1f}s"
+
+    # Whitelist of result keys that make sense as user-facing chips.
+    # Anything else stays in the "Show technical details" expander.
+    pretty = {
+        "favorited_images_found":     "Favorited found",
+        "submitted":                  "Submitted",
+        "failed":                     "Failed",
+        "skipped_already_submitted":  "Skipped (already submitted)",
+        "favorited_image_count":      "Favorited images",
+        "tile_count":                 "Tiles scanned",
+        "items_received":             "Items received",
+        "processed":                  "Processed",
+        "flow_reachable":             "Flow reachable",
+        "chrome_reachable":           "Chrome reachable",
+    }
+    for raw_key, label in pretty.items():
+        if raw_key in result:
+            summary[label] = str(result[raw_key])
+    return summary
+
+
+def _run_via_agent_http(args: list[str], job: dict) -> tuple[int, str]:
+    """Send the job to the local agent's /jobs/run-stream endpoint and
+    render progress events in the same UI cadence as the subprocess
+    path. Public contract is unchanged: returns (exit_code, output)."""
+    import httpx
+    import uuid
+
+    label = _friendly_label_for(args) + " (via local agent)"
+    status_box = st.empty()
+    progress_box = st.empty()
+    status_box.info(f"**{label}** — starting…")
+
+    job_envelope = {
+        "protocol_version": "0.1",
+        "job_id":           f"streamlit-{uuid.uuid4().hex[:12]}",
+        **job,
+    }
+    url = f"{_agent_base_url()}/jobs/run-stream"
+    headers = {**_agent_http_headers(), "Content-Type": "application/json"}
+
+    cli_started = time.monotonic()
+    final_envelope: dict | None = None
+    progress_lines: list[str] = []
+    raw_event_lines: list[str] = []  # preserved for the technical-details expander
+    last_friendly = ""
+
+    try:
+        with st.spinner(f"{label}…"):
+            with httpx.stream(
+                "POST", url,
+                json=job_envelope,
+                headers=headers,
+                timeout=None,  # streaming endpoint, can be many minutes
+            ) as response:
+                if response.status_code != 200:
+                    body = response.read().decode("utf-8", errors="replace")[:400]
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {response.status_code}: {body}",
+                        request=response.request,
+                        response=response,
+                    )
+                for line in response.iter_lines():
+                    if not line.strip():
+                        continue
+                    raw_event_lines.append(line)
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    et = evt.get("event_type")
+                    if et == "result":
+                        final_envelope = evt.get("envelope")
+                    elif et == "progress":
+                        msg = evt.get("message") or evt.get("stage") or ""
+                        cur = evt.get("current")
+                        tot = evt.get("total")
+                        if cur is not None and tot is not None:
+                            friendly = f"• {msg} ({cur}/{tot})"
+                        else:
+                            friendly = f"• {msg}"
+                        if friendly != last_friendly:
+                            last_friendly = friendly
+                            progress_lines.append(friendly)
+                            # Show the last ~3 lines so the user
+                            # sees current activity, not a wall of text.
+                            progress_box.write("\n".join(progress_lines[-3:]))
+    except httpx.HTTPStatusError as exc:
+        elapsed = time.monotonic() - cli_started
+        progress_box.empty()
+        status_box.error(
+            f"**{label}** — HTTP error after {elapsed:.1f}s: {exc}"
+        )
+        return 1, str(exc)
+    except httpx.HTTPError as exc:
+        elapsed = time.monotonic() - cli_started
+        progress_box.empty()
+        status_box.error(
+            f"**{label}** — local agent unreachable at "
+            f"`{_agent_base_url()}` after {elapsed:.1f}s. "
+            f"Start it with: `docker compose --profile agent up -d agent`. "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return 1, str(exc)
+
+    elapsed = time.monotonic() - cli_started
+    progress_box.empty()
+
+    if final_envelope is None:
+        status_box.error(
+            f"**{label}** — stream ended without a result envelope."
+        )
+        return 1, "(no envelope received)"
+
+    success = final_envelope.get("status") == "succeeded"
+    if success:
+        status_box.success(f"**{label}** — done in {elapsed:.1f}s.")
+    else:
+        err = final_envelope.get("error") or {}
+        status_box.error(
+            f"**{label}** — job failed "
+            f"(code={err.get('code', '?')}): "
+            f"{(err.get('message') or '')[:200]}"
+        )
+
+    summary = _summary_from_envelope(final_envelope)
+    if summary:
+        progress_box.markdown(
+            "  ·  ".join(f"**{k}:** {v}" for k, v in summary.items())
+        )
+
+    with st.expander("Show technical details", expanded=False):
+        st.caption(f"`POST {url}`")
+        st.code(json.dumps(final_envelope, indent=2), language="json")
+        if raw_event_lines:
+            st.caption(f"NDJSON stream ({len(raw_event_lines)} line(s))")
+            st.code("\n".join(raw_event_lines), language="json")
+
+    output = json.dumps(final_envelope, indent=2)
+    st.session_state["last_command_output"]   = output
+    st.session_state["last_command_args"]     = args
+    st.session_state["last_command_elapsed_s"] = elapsed
+    st.session_state["last_command_exit_code"] = 0 if success else 1
+    st.session_state["last_command_summary"]  = summary
+    st.session_state["last_command_label"]    = label
+    st.session_state["last_command_cmd"]      = (
+        f"POST {url} (job_type={final_envelope.get('job_type')})"
+    )
+    return (0 if success else 1, output)
+
+
 def run_cli(args: list[str]) -> tuple[int, str]:
-    """Subprocess ``python main.py <args>`` with a friendly UI.
+    """Run an agent action against the local agent HTTP API (if
+    AGENT_EXECUTION_MODE=http AND the action maps to an agent job), or
+    fall back to subprocessing ``python main.py <args>``.
 
     Public contract is unchanged: returns ``(exit_code, full_output)``.
-    The behavior change is purely cosmetic — no streaming wall of text,
-    instead a one-line progress placeholder and a structured summary
-    card after completion. Raw stdout/stderr are tucked under a
-    collapsed "Show technical logs" expander.
     """
+    # Phase-2b: try the local agent HTTP path first. If the user hasn't
+    # opted in (or the args aren't agent-mappable), fall straight through
+    # to the legacy subprocess implementation below.
+    if _agent_execution_mode() == "http":
+        job = _args_to_agent_job(args)
+        if job is not None:
+            return _run_via_agent_http(args, job)
+
     cmd = [sys.executable, str(ROOT / "main.py"), *args]
     label = _friendly_label_for(args)
 
@@ -474,6 +751,131 @@ def _provider_default_model(name: str) -> str:
         "anthropic":  "claude-3-5-sonnet-latest",
         "openrouter": "",  # empty = openrouter/auto
     }.get(name, "")
+
+
+def _render_execution_mode_section(saved_settings, saved_secrets) -> None:
+    """Setup-page block for Phase-2b execution mode.
+
+    Lets the user pick whether agent-supported actions go through the
+    local agent's HTTP API or through the legacy CLI subprocess. The
+    CLI mode remains the default — switching is purely opt-in.
+
+    Surfaces a live status indicator so the user knows whether the
+    agent is reachable before they switch into HTTP mode.
+    """
+    st.subheader("Execution mode (advanced)")
+    st.caption(
+        "Most actions in this UI subprocess `python main.py …`. If you "
+        "boot the local agent HTTP API (`docker compose --profile agent "
+        "up -d agent`), you can switch agent-supported actions to talk "
+        "to it directly for cleaner progress and a stepping stone to a "
+        "future SaaS dashboard. CLI mode is the default and always "
+        "works."
+    )
+
+    current_mode = (
+        saved_settings.agent_execution_mode
+        or os.environ.get("AGENT_EXECUTION_MODE")
+        or "cli"
+    ).strip().lower()
+    if current_mode not in ("cli", "http"):
+        current_mode = "cli"
+    mode_options = ["cli", "http"]
+    mode_idx = mode_options.index(current_mode)
+
+    # Live agent reachability probe.
+    if st.button("Test Agent API", key="setup_test_agent_api"):
+        with st.spinner("Calling /health on the local agent…"):
+            ok, info = agent_http_health(timeout=4.0)
+        if ok:
+            r = info.get("result") or {}
+            st.success(
+                f"Local Agent API is reachable at `{_agent_base_url()}`. "
+                f"agent_ok={r.get('agent_ok')}, "
+                f"chrome_reachable={r.get('chrome_reachable')}, "
+                f"flow_reachable={r.get('flow_reachable')}."
+            )
+        else:
+            st.error(
+                f"Local Agent API is **not reachable** at "
+                f"`{_agent_base_url()}`. "
+                "Start it with: `docker compose --profile agent up -d agent`"
+            )
+            with st.expander("Show technical details", expanded=False):
+                st.code(json.dumps(info, indent=2), language="json")
+
+    # Status chip — every render, cached for ~30s in session_state so we
+    # don't slam /health on every rerun.
+    status_cache_key = "agent_http_status_cache"
+    cache = st.session_state.get(status_cache_key) or {}
+    cache_age = time.monotonic() - cache.get("at", 0.0)
+    if not cache or cache_age > 30.0:
+        ok, info = agent_http_health(timeout=2.0)
+        cache = {"ok": ok, "info": info, "at": time.monotonic()}
+        st.session_state[status_cache_key] = cache
+    if cache["ok"]:
+        st.success(
+            f"Agent API: **Connected** ({_agent_base_url()})"
+        )
+    else:
+        st.warning(
+            f"Agent API: **Not connected** at {_agent_base_url()}. "
+            "Switch off HTTP mode below if you don't plan to start it, "
+            "or run `docker compose --profile agent up -d agent`."
+        )
+
+    with st.form("execution_mode_form"):
+        new_mode = st.selectbox(
+            "Execution mode",
+            mode_options,
+            index=mode_idx,
+            format_func=lambda m: {"cli": "Local CLI (default)",
+                                   "http": "Local Agent HTTP"}[m],
+            help=(
+                "Local CLI subprocesses `python main.py …` exactly as "
+                "today. Local Agent HTTP routes agent-supported actions "
+                "to http://127.0.0.1:9444 — actions not yet migrated "
+                "(manifest fresh-load, etc.) still fall through to CLI."
+            ),
+        )
+        agent_url = st.text_input(
+            "Agent base URL",
+            value=saved_settings.agent_base_url or "http://127.0.0.1:9444",
+            help=(
+                "Default http://127.0.0.1:9444. Change this only if you "
+                "moved the agent server to a different host/port."
+            ),
+        )
+        agent_token = st.text_input(
+            "Agent API token (optional)",
+            value=saved_secrets.agent_api_token,
+            type="password",
+            help=(
+                f"Currently saved: {mask_key(saved_secrets.agent_api_token)}. "
+                "Required only if the agent itself was started with "
+                "AGENT_API_TOKEN set."
+            ),
+        )
+        save_exec = st.form_submit_button("💾  Save execution mode", type="primary")
+
+    if save_exec:
+        try:
+            new_settings = load_user_settings()
+            new_settings.agent_execution_mode = new_mode.strip().lower()
+            new_settings.agent_base_url = agent_url.strip()
+            new_secrets = load_user_secrets()
+            new_secrets.agent_api_token = agent_token.strip()
+            save_user_settings(new_settings)
+            save_user_secrets(new_secrets)
+            apply_user_settings_to_env(new_settings, new_secrets)
+            # Force the status cache to refresh on the next render.
+            st.session_state.pop(status_cache_key, None)
+            st.success(
+                f"Saved. Execution mode = **{new_mode}**. "
+                "Take effect immediately for new actions."
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not save execution mode: {exc}")
 
 
 def page_setup() -> None:
@@ -677,12 +1079,20 @@ def page_setup() -> None:
 
     st.divider()
 
+    # --- Execution mode (Phase 2b) ---------------------------------------
+    _render_execution_mode_section(saved_settings, saved_secrets)
+
+    st.divider()
+
     # --- Saved values summary --------------------------------------------
     st.subheader("Currently saved")
     st.dataframe(
         [
             {"setting": "Market",                 "value": saved_settings.market or "(US default)"},
             {"setting": "AI Provider",            "value": saved_settings.ai_provider or "(empty)"},
+            {"setting": "Execution mode",         "value": saved_settings.agent_execution_mode or "(cli)"},
+            {"setting": "Agent base URL",         "value": saved_settings.agent_base_url or "(127.0.0.1:9444)"},
+            {"setting": "Agent API token",        "value": mask_key(saved_secrets.agent_api_token)},
             {"setting": "OpenAI model",           "value": saved_settings.openai_model or "(default)"},
             {"setting": "OpenAI API key",         "value": mask_key(saved_secrets.openai_api_key)},
             {"setting": "Anthropic model",        "value": saved_settings.anthropic_model or "(default)"},

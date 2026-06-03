@@ -1,0 +1,19 @@
+# Runner-only dependency set. Used by PyInstaller to bundle
+# FlowBOFRunner.exe. Strictly the modules src.runner_app +
+# src.agent_api transitively need to drive Flow.
+#
+# Compared to the full requirements.txt this file drops:
+#   - Streamlit (the dev UI)
+#   - AI provider SDKs (openai, anthropic) — the runner never
+#     calls them; AI prompt generation lives in the SaaS
+#   - openpyxl + streamlit-paste-button (Streamlit-side only)
+#
+# If a packaging run starts complaining about a missing module,
+# add it here AND to FlowBOFRunner.spec's hidden_imports.
+
+playwright==1.48.0
+python-dotenv==1.0.1
+httpx<0.28
+
+# Build tooling.
+pyinstaller>=6.10
