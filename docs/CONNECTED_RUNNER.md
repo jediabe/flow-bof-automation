@@ -99,6 +99,120 @@ The progress callback is the same one `--agent-job-json
 that fail are logged but never crash the job — progress is
 informational.
 
+## Dedicated Chrome profile
+
+The runner launches Chrome with its own `--user-data-dir`:
+
+- Windows: `%LOCALAPPDATA%\FlowBOF\ChromeProfile`
+- macOS:   `~/Library/Application Support/FlowBOF/chrome-profile`
+
+That profile is **separate from your normal Chrome**. Closing your
+normal Chrome doesn't affect the runner; closing the runner's
+Chrome window doesn't affect your normal browsing. The runner never
+kills Chrome processes wholesale — it only operates on the Chrome
+instances it spawned, against the dedicated profile.
+
+### Closed the runner's Flow window by accident?
+
+Two ways to bring it back without touching your normal Chrome:
+
+- **Menu:** in the running runner, choose
+  `Open/Reopen Google Flow browser`.
+- **CLI:** `FlowBOFRunner --open-browser` (or
+  `python runner_app.py --open-browser`).
+
+The helper picks the cheapest option that works:
+
+1. Activates an existing Flow tab in the dedicated profile if it
+   finds one (no new Chrome process).
+2. Opens a fresh Flow tab in the dedicated profile via the CDP
+   `PUT /json/new` endpoint (still no new process).
+3. Cold-launches the dedicated Chrome profile if the window was
+   fully closed.
+
+## Console lifecycle
+
+The packaged runner runs in **console mode**:
+
+- Windows: the `.exe` is built with `console=True`. Double-clicking
+  opens a console window that stays open while the runner runs.
+- macOS: double-click `Run Flow BOF Runner.command` to open the
+  runner in a real Terminal window (a bare `.app` launched from
+  Finder is silent — that's a macOS limitation, not a runner bug).
+
+On error / Ctrl-C, the window does **not** auto-close — it prints
+"Press Enter to exit." or "Runner stopped. Press Enter to exit." so
+the operator can read what happened. Pass `--no-pause` (CI / build
+smoke-tests) to skip the prompt.
+
+While the runner is polling, the console keeps showing per-second
+status, claimed-job lines, progress events, and the final
+succeeded/failed status. Closing that console window stops the
+runner and any in-flight job completes its current step before
+exiting.
+
+## Automatic Flow UI prep
+
+Before every image or video submit the runner runs a centralised
+prep pass against the dedicated Chrome profile. The goal is to
+recover from Flow leaving stale UI state behind — open menus,
+suggestion pills, agent panels — that would otherwise intercept
+clicks on the prompt input or the Generate button.
+
+The prep code lives in `src/flow_ui_prep.py` and is called by both
+agent handlers (`_handle_generate_flow_images` and
+`_handle_generate_flow_videos_from_favorites`), so the Docker /
+CLI path, the connected runner, and the packaged exe / .app all
+behave identically.
+
+What happens, per job step:
+
+1. **Dismiss overlays.** `Escape`, then mouse to the corner, then
+   a bounded sweep of visible buttons whose `aria-label` / `title`
+   matches `close|dismiss|cancel` and *doesn't* match anything
+   destructive (delete / discard / leave / confirm). Any leftover
+   Radix menu (`[data-radix-menu-content]`, `[role="menu"]`,
+   `[role="dialog"]`) gets one more `Escape`.
+2. **Close agent prompt pills.** Targets the Material Symbols
+   `close` glyph inside agent-prompt chips. Same destructive
+   guard.
+3. **Verify generation settings.** Image jobs re-apply 9:16 / 1x /
+   Nano Banana Pro by calling `_apply_project_settings` in
+   `recorded_flow.py`. Video jobs don't have a per-job setting
+   beyond "no stale composer open" — the dismiss pass above
+   covers that.
+
+The prep is **best-effort**: any failure is logged and the job
+proceeds. Each step's result is also emitted as a `flow_ui_prep`
+JobEvent on the SaaS so a debug pass shows up in the job
+timeline.
+
+### Env switches
+
+| Variable                            | Default | Effect when off                                                                                            |
+| ----------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `FLOW_UI_PREP_ENABLED`              | `true`  | Skip the entire prep pass.                                                                                 |
+| `FLOW_DISMISS_OVERLAYS`             | `true`  | Skip the Escape / close-button / menu sweep.                                                               |
+| `FLOW_ENSURE_GENERATION_SETTINGS`   | `true`  | Skip re-applying 9:16 / 1x / Nano Banana Pro.                                                              |
+| `DEBUG_FLOW_PREP`                   | `false` | Log every step (no-ops included) at INFO. Useful when triaging a Flow UI regression.                       |
+
+These are operator switches — not surfaced in the SaaS UI. Set
+them on the runner shell / Docker env for one-off debugging.
+
+### Video prompt
+
+Video jobs always submit the **universal blanket video prompt**:
+
+> Slow handheld iPhone-style push-in toward the product. A hand
+> enters the frame and gently taps the product once, as if the
+> person recording is checking it on the shelf. Preserve the exact
+> product appearance. Keep the environment stable and realistic.
+> No morphing, no dramatic camera move, no cinematic lighting.
+
+The runner doesn't accept per-tile video prompts in the SaaS-driven
+flow; the prompt is sourced from `config.py` regardless of what's
+on the product row.
+
 ## What never crosses the boundary
 
 - **Generated media.** Final videos + generated images stay in

@@ -44,13 +44,16 @@ for serializing the dict and choosing the exit code.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import platform
+import re
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 
 
 # Type alias: a progress callback receives one fully-formed progress
@@ -866,6 +869,33 @@ def _handle_generate_flow_videos_from_favorites(
                         "edit_id":  tile.edit_id,
                     },
                 )
+
+                # Centralised per-tile Flow-UI cleanup: dismiss any
+                # menu / dialog / agent pill left over from the
+                # previous tile so the next overflow click lands on
+                # the right element. perform_recorded_video_flow
+                # also has its own Escape + mouse-to-corner at the
+                # top; this layer adds the aria-label close-button
+                # + Radix menu sweeps. Never raises.
+                try:
+                    from .flow_ui_prep import prepare_flow_for_video_generation
+                    prep_report = prepare_flow_for_video_generation(
+                        page, logger=logger,
+                    )
+                    if prep_report and not prep_report.get("skipped"):
+                        emit(
+                            "flow_ui_prep",
+                            "Flow UI prep complete",
+                            current=n,
+                            total=len(to_submit),
+                            details={"prep": prep_report},
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "flow-ui-prep raised before video submit "
+                        "(media_id=%s): %s", tile.flow_media_id, exc,
+                    )
+
                 try:
                     perform_recorded_video_flow(
                         page,
@@ -1026,6 +1056,128 @@ def _handle_generate_flow_videos_from_favorites(
     })
 
 
+# ---------------------------------------------------------------------
+# Reference-image download helpers (URL → local file)
+# ---------------------------------------------------------------------
+#
+# The SaaS dispatches generate_flow_images jobs with `reference_image_url`
+# pointing at a publicly-fetchable copy of each product image
+# (https://app.autobof.xyz/uploads/...). The runner downloads each URL
+# once, caches it under data/agent_cache/reference_images/<job_id>/
+# <item_id>.<ext>, and hands the cached path to perform_recorded_flow().
+_IMAGE_CONTENT_TYPES: Dict[str, str] = {
+    "image/jpeg":     "jpg",
+    "image/jpg":      "jpg",
+    "image/pjpeg":    "jpg",
+    "image/png":      "png",
+    "image/webp":     "webp",
+    "image/gif":      "gif",
+    "image/bmp":      "bmp",
+    "image/tiff":     "tiff",
+}
+
+_IMAGE_MAGIC_BYTES = (
+    (b"\xff\xd8\xff",                  "jpg"),
+    (b"\x89PNG\r\n\x1a\n",             "png"),
+    (b"GIF87a",                        "gif"),
+    (b"GIF89a",                        "gif"),
+    (b"RIFF",                          "webp"),
+    (b"BM",                            "bmp"),
+    (b"II*\x00",                       "tiff"),
+    (b"MM\x00*",                       "tiff"),
+)
+
+
+def _infer_reference_image_ext(
+    *,
+    content_type: str | None,
+    url: str,
+    body_head: bytes,
+) -> str:
+    """Best-effort image extension. Falls back to "jpg"."""
+    if content_type:
+        ct = content_type.split(";", 1)[0].strip().lower()
+        if ct in _IMAGE_CONTENT_TYPES:
+            return _IMAGE_CONTENT_TYPES[ct]
+    parsed = urlparse(url)
+    path_suffix = Path(parsed.path).suffix.lower().lstrip(".")
+    if path_suffix:
+        if path_suffix == "jpeg":
+            return "jpg"
+        if path_suffix in {"jpg", "png", "webp", "gif", "bmp", "tiff"}:
+            return path_suffix
+    for prefix, ext in _IMAGE_MAGIC_BYTES:
+        if body_head.startswith(prefix):
+            if ext == "webp" and b"WEBP" not in body_head[:16]:
+                continue
+            return ext
+    guess, _ = mimetypes.guess_type(parsed.path)
+    if guess and guess in _IMAGE_CONTENT_TYPES:
+        return _IMAGE_CONTENT_TYPES[guess]
+    return "jpg"
+
+
+def _sanitize_item_id_for_filename(item_id: str) -> str:
+    """Strip filename-unsafe chars from a SaaS Product.id (cuid)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", item_id)[:120] or "item"
+
+
+def _download_reference_image(
+    *,
+    url: str,
+    cache_dir: Path,
+    item_id: str,
+    logger: logging.Logger,
+    timeout_seconds: float = 30.0,
+) -> Path:
+    """Download `url` into `cache_dir` and return the cached file path.
+
+    Uses httpx when present (already a dep via the AI providers);
+    falls back to urllib for stripped installs. Raises any exception
+    verbatim — the caller maps it to REFERENCE_IMAGE_DOWNLOAD_FAILED.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = _sanitize_item_id_for_filename(item_id)
+
+    body: bytes
+    content_type: str | None = None
+
+    try:
+        import httpx  # noqa: WPS433
+    except ImportError:
+        httpx = None  # type: ignore[assignment]
+
+    if httpx is not None:
+        with httpx.Client(
+            timeout=timeout_seconds,
+            follow_redirects=True,
+        ) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            body = resp.content
+            content_type = resp.headers.get("content-type")
+    else:
+        from urllib.request import Request, urlopen  # noqa: WPS433
+        req = Request(url, headers={"User-Agent": "flow-bof-runner/0.1"})
+        with urlopen(req, timeout=timeout_seconds) as r:  # noqa: S310
+            body = r.read()
+            content_type = r.headers.get("Content-Type")
+
+    if not body:
+        raise ValueError("empty response body")
+
+    ext = _infer_reference_image_ext(
+        content_type=content_type, url=url, body_head=body[:32],
+    )
+    dest = cache_dir / f"{safe_id}.{ext}"
+    dest.write_bytes(body)
+    logger.info(
+        "cached reference image: %s -> %s (%d bytes, content-type=%s)",
+        url, dest, len(body), content_type or "?",
+    )
+    return dest
+
+
 def _handle_generate_flow_images(
     job: dict,
     logger: logging.Logger,
@@ -1033,23 +1185,35 @@ def _handle_generate_flow_images(
 ) -> dict:
     """Submit image generations in Flow from in-payload items.
 
-    Alpha/local version: each item carries its own local reference
-    image path + image_prompt — no SaaS signed-URL download yet. The
-    SaaS migration phase that adds signed URLs will modify this
-    handler to optionally fetch reference_image_url to a temp file
-    before calling perform_recorded_flow().
+    Each item carries an image_prompt plus *one* reference source:
+
+      - reference_image_path : local filesystem path on the runner
+                               machine. Used by local dev / debug
+                               overrides.
+      - reference_image_url  : HTTP(S) URL the runner downloads into
+                               data/agent_cache/reference_images/
+                               <job_id>/<item_id>.<ext> before calling
+                               perform_recorded_flow(). The SaaS uses
+                               this for Kalodata-imported references.
+
+    If both are set, the path wins when it exists on disk; otherwise
+    the URL is tried. If neither yields a usable file the item fails
+    with REFERENCE_IMAGE_MISSING. URL download failures map to
+    REFERENCE_IMAGE_DOWNLOAD_FAILED.
+
+    Each result.items[] row carries:
+      - reference_source: "path" | "url" | None
+      - downloaded_reference_path: set only when reference_source=="url"
 
     Behavior:
       1. Validate each item up front; surface invalid items in
-         result.items as failed with code=INVALID_ITEM. This means
-         missing/unreadable reference files are caught BEFORE we open
-         Chrome.
+         result.items as failed with code=INVALID_ITEM /
+         REFERENCE_IMAGE_MISSING / REFERENCE_IMAGE_DOWNLOAD_FAILED.
+         This means broken inputs are caught BEFORE we open Chrome.
       2. Open the existing Flow tab (never opens a new one — fails
          with FLOW_PAGE_NOT_FOUND if no Flow tab exists).
       3. For each valid item call perform_recorded_flow() with the
-         supplied prompt + reference path. This is the same function
-         the local Streamlit / CSV-driven path uses; behavior matches
-         "Generate Images" in the BOF page.
+         supplied prompt + (path or downloaded-cache) reference.
       4. Continue past per-item failures.
 
     NON-mutations:
@@ -1080,7 +1244,8 @@ def _handle_generate_flow_images(
             job,
             "MISSING_ITEMS",
             "payload.items must be a non-empty list of "
-            "{item_id, product_name, reference_image_path, image_prompt} objects.",
+            "{item_id, product_name, image_prompt, reference_image_path | "
+            "reference_image_url} objects.",
         )
 
     try:
@@ -1135,6 +1300,22 @@ def _handle_generate_flow_images(
     # Done BEFORE opening Chrome so we don't waste a browser session on a
     # batch full of typos. Invalid items become "failed" entries in the
     # result and don't block the valid ones.
+    #
+    # Resolution order per item:
+    #   1. reference_image_path (if provided AND the file exists on disk)
+    #         → reference_source="path"
+    #   2. reference_image_url  (if provided)
+    #         → download to data/agent_cache/reference_images/<job_id>/
+    #         → reference_source="url"
+    #   3. Otherwise: REFERENCE_IMAGE_MISSING.
+    job_id_for_cache = (
+        (str(job.get("job_id") or "")).strip() or f"adhoc-{int(time.monotonic())}"
+    )
+    cache_dir = (
+        settings.repo_root / "data" / "agent_cache" / "reference_images"
+        / _sanitize_item_id_for_filename(job_id_for_cache)
+    )
+
     valid_items: list[dict] = []
     items_out: list[dict] = []
     pre_failed = 0
@@ -1146,6 +1327,7 @@ def _handle_generate_flow_images(
                 "product_name": "",
                 "status":       "failed",
                 "media_id":     None,
+                "reference_source": None,
                 "error": {
                     "code":    "INVALID_ITEM",
                     "message": f"items[{idx}] is not an object",
@@ -1156,40 +1338,8 @@ def _handle_generate_flow_images(
         item_id = (str(raw_item.get("item_id") or "")).strip() or f"item_{idx + 1:02d}"
         product_name = (str(raw_item.get("product_name") or "")).strip()
         ref_path_raw = (str(raw_item.get("reference_image_path") or "")).strip()
+        ref_url_raw = (str(raw_item.get("reference_image_url") or "")).strip()
         prompt = str(raw_item.get("image_prompt") or "")
-
-        if not ref_path_raw:
-            pre_failed += 1
-            items_out.append({
-                "item_id":      item_id,
-                "product_name": product_name,
-                "status":       "failed",
-                "media_id":     None,
-                "error": {
-                    "code":    "INVALID_ITEM",
-                    "message": "reference_image_path is required",
-                },
-            })
-            continue
-
-        # Resolve relative paths under repo_root for parity with how the
-        # rest of the codebase treats inputs/reference_images/...
-        ref_path = Path(ref_path_raw)
-        if not ref_path.is_absolute():
-            ref_path = settings.repo_root / ref_path
-        if not ref_path.exists() or not ref_path.is_file():
-            pre_failed += 1
-            items_out.append({
-                "item_id":      item_id,
-                "product_name": product_name,
-                "status":       "failed",
-                "media_id":     None,
-                "error": {
-                    "code":    "REFERENCE_IMAGE_NOT_FOUND",
-                    "message": f"File does not exist: {ref_path}",
-                },
-            })
-            continue
 
         if not prompt.strip():
             pre_failed += 1
@@ -1198,6 +1348,7 @@ def _handle_generate_flow_images(
                 "product_name": product_name,
                 "status":       "failed",
                 "media_id":     None,
+                "reference_source": None,
                 "error": {
                     "code":    "INVALID_ITEM",
                     "message": "image_prompt is required",
@@ -1205,10 +1356,87 @@ def _handle_generate_flow_images(
             })
             continue
 
+        resolved_path: Path | None = None
+        reference_source: str | None = None
+        downloaded_reference_path: str | None = None
+
+        if ref_path_raw:
+            candidate = Path(ref_path_raw)
+            if not candidate.is_absolute():
+                candidate = settings.repo_root / candidate
+            if candidate.exists() and candidate.is_file():
+                resolved_path = candidate
+                reference_source = "path"
+            elif not ref_url_raw:
+                pre_failed += 1
+                items_out.append({
+                    "item_id":      item_id,
+                    "product_name": product_name,
+                    "status":       "failed",
+                    "media_id":     None,
+                    "reference_source": None,
+                    "error": {
+                        "code":    "REFERENCE_IMAGE_NOT_FOUND",
+                        "message": f"File does not exist: {candidate}",
+                    },
+                })
+                continue
+
+        # URL fallback. Either no path was supplied, or the path
+        # didn't exist on disk but a URL was provided alongside it.
+        if resolved_path is None and ref_url_raw:
+            try:
+                downloaded = _download_reference_image(
+                    url=ref_url_raw,
+                    cache_dir=cache_dir,
+                    item_id=item_id,
+                    logger=logger,
+                )
+            except Exception as exc:  # noqa: BLE001
+                pre_failed += 1
+                items_out.append({
+                    "item_id":      item_id,
+                    "product_name": product_name,
+                    "status":       "failed",
+                    "media_id":     None,
+                    "reference_source": "url",
+                    "error": {
+                        "code":    "REFERENCE_IMAGE_DOWNLOAD_FAILED",
+                        "message": (
+                            f"{type(exc).__name__}: {exc} "
+                            f"(url={ref_url_raw})"
+                        ),
+                    },
+                })
+                continue
+            resolved_path = downloaded
+            reference_source = "url"
+            downloaded_reference_path = str(downloaded)
+
+        if resolved_path is None:
+            pre_failed += 1
+            items_out.append({
+                "item_id":      item_id,
+                "product_name": product_name,
+                "status":       "failed",
+                "media_id":     None,
+                "reference_source": None,
+                "error": {
+                    "code":    "REFERENCE_IMAGE_MISSING",
+                    "message": (
+                        "Provide either reference_image_path (local "
+                        "file) or reference_image_url."
+                    ),
+                },
+            })
+            continue
+
         valid_items.append({
             "item_id":              item_id,
             "product_name":         product_name,
-            "reference_image_path": str(ref_path),
+            "reference_image_path": str(resolved_path),
+            "reference_source":     reference_source,
+            "downloaded_reference_path": downloaded_reference_path,
             "image_prompt":         prompt,
         })
 
@@ -1307,6 +1535,36 @@ def _handle_generate_flow_images(
                         "product_name": item["product_name"],
                     },
                 )
+
+                # Centralised per-item Flow-UI cleanup:
+                #   - dismiss stale menus / dialogs / agent pills
+                #   - re-apply 9:16 / 1x / Nano Banana Pro settings
+                # Never raises; the report goes into the progress
+                # event for diagnostics. Toggle via FLOW_UI_PREP_*
+                # env vars when something looks off; see
+                # src/flow_ui_prep.py.
+                try:
+                    from .flow_ui_prep import prepare_flow_for_image_generation
+                    prep_report = prepare_flow_for_image_generation(
+                        page,
+                        logger=logger,
+                        selector_timeout_ms=settings.selector_timeout_ms,
+                    )
+                    if prep_report and not prep_report.get("skipped"):
+                        emit(
+                            "flow_ui_prep",
+                            "Flow UI prep complete",
+                            current=n,
+                            total=len(valid_items),
+                            details={"prep": prep_report},
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    # Prep failure must NEVER kill the job — log and
+                    # let perform_recorded_flow attempt the submit.
+                    logger.warning(
+                        "flow-ui-prep raised before image submit (item=%s): %s",
+                        item["item_id"], exc,
+                    )
 
                 try:
                     tiles = perform_recorded_flow(
