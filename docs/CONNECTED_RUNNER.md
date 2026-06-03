@@ -176,7 +176,17 @@ What happens, per job step:
 2. **Close agent prompt pills.** Targets the Material Symbols
    `close` glyph inside agent-prompt chips. Same destructive
    guard.
-3. **Verify generation settings.** Image jobs re-apply 9:16 / 1x /
+3. **Toggle off Agent mode.** Flow's composer has an "Agent" pill
+   next to the `+` button. When pressed (`aria-pressed="true"`),
+   the Generate arrow runs Flow's *agent flow* instead of the
+   standard image-generation flow we automate — the recorded
+   selectors all assume the standard flow, so a pressed Agent
+   pill silently breaks every submit. The prep clicks the pill
+   if `aria-pressed="true"` and verifies it flips to `"false"`
+   before continuing. Visible symptom this guards against: the
+   "Hi <name> / What would you like to do?" landing screen with
+   three preset action buttons.
+4. **Verify generation settings.** Image jobs re-apply 9:16 / 1x /
    Nano Banana Pro by calling `_apply_project_settings` in
    `recorded_flow.py`. Video jobs don't have a per-job setting
    beyond "no stale composer open" — the dismiss pass above

@@ -2,6 +2,17 @@
 .env.local
 *.local.env
 .venv/
+# Glob catches `.venv-runner/` (the PyInstaller build venv created by
+# scripts/build_runner_windows.ps1 / build_runner_mac.sh) plus any
+# future per-purpose virtualenv like `.venv-tests/`. Each is hundreds
+# of MB of platform-specific binaries; fully reconstructible from
+# requirements*.txt.
+.venv-*/
+
+# PyInstaller intermediate artefacts. `dist/` is already ignored
+# below; this is the pre-bundle workdir.
+build/
+
 __pycache__/
 *.pyc
 .pytest_cache/

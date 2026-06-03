@@ -219,9 +219,32 @@ Write-Host "Running PyInstaller..." -ForegroundColor Cyan
 # `--clean` drops PyInstaller's intermediate build/ cache so the spec
 # file's `excludes` actually take effect on a rebuild. `--noconfirm`
 # overwrites any existing dist/FlowBOFRunner.exe without asking.
+# Defensive: kill any FlowBOFRunner processes left over from prior
+# sessions before PyInstaller tries to overwrite dist\FlowBOFRunner.exe.
+# Without this, a running runner holds the file open and PyInstaller
+# dies with `[WinError 5] Access is denied`. Idempotent — silently
+# does nothing when nothing's running.
+$running = Get-Process FlowBOFRunner -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host ("Stopping {0} stale FlowBOFRunner process(es)..." -f $running.Count) -ForegroundColor Yellow
+    $running | Stop-Process -Force
+    Start-Sleep -Seconds 1
+}
+
 & $VenvPyInst FlowBOFRunner.spec --clean --noconfirm
 if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
     Write-Host "[FAIL] PyInstaller failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    # The most common rerun failure is "Access is denied" because a
+    # FlowBOFRunner instance got spawned between the kill above and
+    # the build trying to overwrite dist\FlowBOFRunner.exe — surface
+    # the actionable fix instead of leaving the user to read the
+    # PyInstaller stack trace.
+    if (Get-Process FlowBOFRunner -ErrorAction SilentlyContinue) {
+        Write-Host "       A FlowBOFRunner process is still running. Close every" -ForegroundColor Yellow
+        Write-Host "       runner window (including ones hidden in the system tray)" -ForegroundColor Yellow
+        Write-Host "       and re-run this script." -ForegroundColor Yellow
+    }
     exit 1
 }
 

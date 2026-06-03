@@ -298,6 +298,95 @@ def close_agent_prompt_pills(
     return {"agent_pills_closed": closed}
 
 
+def toggle_off_agent_mode(
+    page: "Page",
+    *,
+    logger: logging.Logger,
+) -> dict:
+    """Toggle Flow's composer out of *Agent mode* if it's currently on.
+
+    Flow's composer has an "Agent" pill next to the `+` button. When
+    pressed (`aria-pressed="true"`), the Generate arrow runs the
+    Agent flow instead of the standard image-generation flow — the
+    runner's recorded selectors all assume the standard flow, so a
+    pressed Agent pill silently breaks every submit.
+
+    Visible symptom (matches the user's screenshots):
+      - "Hi <name> / What would you like to do?" landing screen
+        with three preset action buttons.
+      - A white "Agent" pill at the composer's bottom-left.
+
+    We:
+      1. Find any visible `button[aria-pressed="true"]` whose text
+         is exactly "Agent" (case-insensitive, whitespace-tolerant).
+      2. Click it. After the click, Flow flips `aria-pressed` to
+         `"false"` and the landing screen collapses back into the
+         normal composer.
+      3. Verify the new state before declaring success.
+
+    Safe and idempotent: if Agent isn't pressed, the function is a
+    no-op. If multiple Agent-shaped buttons match, we only toggle
+    the *pressed* ones — never touch a depressed (off) pill.
+    """
+    import re
+
+    toggled = 0
+    try:
+        # Filter chain: `aria-pressed="true"` first (cheap), then
+        # exact-match text "Agent" (case + whitespace insensitive).
+        candidates = page.locator("button[aria-pressed='true']").filter(
+            has_text=re.compile(r"^\s*Agent\s*$", re.I),
+        )
+        n = min(candidates.count(), 4)
+        for i in range(n):
+            try:
+                el = candidates.nth(i)
+                if not el.is_visible(timeout=300):
+                    continue
+                logger.info("Flow UI prep: toggling off Agent mode")
+                el.click(timeout=1500)
+                toggled += 1
+                # Brief settle — Flow swaps the composer DOM in
+                # response to the click; give it a beat before the
+                # next prep step (apply_project_settings) runs.
+                page.wait_for_timeout(300)
+            except Exception as exc:  # noqa: BLE001
+                if is_debug():
+                    logger.info(
+                        "flow-ui-prep: agent-pill click skipped: %s", exc,
+                    )
+                continue
+    except Exception as exc:  # noqa: BLE001
+        if is_debug():
+            logger.info("flow-ui-prep: agent-pill sweep error: %s", exc)
+
+    # Verification: confirm no Agent pill is still pressed.
+    still_pressed = 0
+    try:
+        leftover = page.locator("button[aria-pressed='true']").filter(
+            has_text=re.compile(r"^\s*Agent\s*$", re.I),
+        )
+        still_pressed = leftover.count()
+    except Exception:  # noqa: BLE001
+        pass
+
+    if toggled and still_pressed == 0:
+        logger.info("Flow UI prep: Agent mode is now off")
+    elif toggled and still_pressed:
+        logger.warning(
+            "Flow UI prep: clicked Agent pill %d time(s) but "
+            "%d still report aria-pressed=true; Flow may have "
+            "renamed the pill or wrapped it in a child element.",
+            toggled, still_pressed,
+        )
+    elif is_debug():
+        logger.info("Flow UI prep: Agent mode already off")
+    return {
+        "agent_toggled_off": toggled,
+        "agent_still_pressed": still_pressed,
+    }
+
+
 # ---------------------------------------------------------------------
 # Step 2 — generation settings
 # ---------------------------------------------------------------------
@@ -382,12 +471,26 @@ def prepare_flow_for_image_generation(
     selector_timeout_ms: int = 15_000,
 ) -> dict:
     """One-stop prep before each image submit. Returns a dict the
-    caller can include in JobEvent details / diagnostics."""
+    caller can include in JobEvent details / diagnostics.
+
+    Step order matters:
+      1. Dismiss overlays — get any blocking dialog / menu out of
+         the way so subsequent clicks aren't intercepted.
+      2. Close agent prompt suggestion *chips* — small in-composer
+         pills that intercept the prompt input.
+      3. Toggle off *Agent mode* — the composer-toolbar pill that
+         routes the Generate arrow through Flow's agent flow
+         instead of the standard image-generation flow we automate.
+         MUST run before step 4, because the settings popover is
+         hidden / behaves differently in Agent mode.
+      4. Re-apply 9:16 / 1x / Nano Banana Pro.
+    """
     if not is_prep_enabled():
         return {"skipped": True, "reason": "FLOW_UI_PREP_ENABLED=false"}
     report: dict = {}
     report["dismiss"] = dismiss_flow_overlays(page, logger=logger)
     report["agent_pills"] = close_agent_prompt_pills(page, logger=logger)
+    report["agent_mode"] = toggle_off_agent_mode(page, logger=logger)
     report["settings"] = ensure_image_generation_settings(
         page, logger=logger, selector_timeout_ms=selector_timeout_ms,
     )
@@ -399,11 +502,17 @@ def prepare_flow_for_video_generation(
     *,
     logger: logging.Logger,
 ) -> dict:
-    """One-stop prep before each Animate-from-favorite click."""
+    """One-stop prep before each Animate-from-favorite click.
+
+    Same order as image prep, minus the project-settings re-apply
+    (video has no per-job 'mode' to enforce). Agent mode still
+    matters — it changes how the tile overflow menu renders.
+    """
     if not is_prep_enabled():
         return {"skipped": True, "reason": "FLOW_UI_PREP_ENABLED=false"}
     report: dict = {}
     report["dismiss"] = dismiss_flow_overlays(page, logger=logger)
     report["agent_pills"] = close_agent_prompt_pills(page, logger=logger)
+    report["agent_mode"] = toggle_off_agent_mode(page, logger=logger)
     report["settings"] = ensure_video_generation_settings(page, logger=logger)
     return report
