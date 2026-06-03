@@ -1172,6 +1172,36 @@ def perform_recorded_video_flow(
     if _click_with_fallback(page, animate, "Animate", logger) is None:
         raise RecordedFlowError("Animate click failed across all methods.")
 
+    # --- 4b. Pin the video model to "Veo 3.1 - Lite" ----------------------
+    # Flow defaults some sessions to "Omni Flash" — a text-to-video
+    # model that ignores the reference image. When that happens, the
+    # favorited tile we just promoted into the composer is discarded
+    # and the generation comes back without the source content.
+    # Veo 3.1 - Lite is the image-to-video model we want.
+    #
+    # Best-effort: the helper never raises, so a Flow UI change here
+    # logs a warning and the submit proceeds with whatever model was
+    # previously selected (better than aborting the whole batch).
+    # Late import — flow_ui_prep imports from this module, so the
+    # top-level import would be circular.
+    try:
+        from .flow_ui_prep import ensure_veo_lite_model
+        model_report = ensure_veo_lite_model(
+            page, logger=logger,
+            selector_timeout_ms=selector_timeout_ms,
+        )
+        if model_report and not model_report.get("skipped") and model_report.get("model_now"):
+            logger.info(
+                "video model pinned to %r (was %r)",
+                model_report.get("model_now"),
+                model_report.get("model_was") or "(unknown)",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "flow-ui-prep: video model pin raised non-fatal error: %s",
+            exc,
+        )
+
     # --- 5. Fill the video prompt -----------------------------------------
     prompt_input = _locate_prompt_input(page)
     try:

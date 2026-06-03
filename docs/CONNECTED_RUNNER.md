@@ -188,9 +188,17 @@ What happens, per job step:
    three preset action buttons.
 4. **Verify generation settings.** Image jobs re-apply 9:16 / 1x /
    Nano Banana Pro by calling `_apply_project_settings` in
-   `recorded_flow.py`. Video jobs don't have a per-job setting
-   beyond "no stale composer open" — the dismiss pass above
-   covers that.
+   `recorded_flow.py`.
+
+   Video jobs additionally pin the composer's model to
+   **Veo 3.1 - Lite** (image-to-video) — Flow occasionally lands
+   sessions on *Omni Flash* (text-to-video), which silently
+   discards the favorited reference image and produces a
+   prompt-only animation. The pin happens right after the Animate
+   menuitem click inside `perform_recorded_video_flow`, because
+   the Video tab in the settings popover only exposes the model
+   dropdown once the tile has been promoted into the composer.
+   See `ensure_veo_lite_model()` in `flow_ui_prep.py`.
 
 The prep is **best-effort**: any failure is logged and the job
 proceeds. Each step's result is also emitted as a `flow_ui_prep`
