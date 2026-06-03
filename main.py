@@ -349,6 +349,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "AGENT_API_PORT, AGENT_API_TOKEN. See docs/LOCAL_AGENT_HTTP_API.md."
         ),
     )
+    parser.add_argument(
+        "--runner-poll",
+        action="store_true",
+        help=(
+            "Connected-runner polling mode. Dials out to the hosted "
+            "SaaS at $SAAS_BASE_URL with $RUNNER_TOKEN, claims queued "
+            "jobs, runs them locally, posts results back. See "
+            "docs/CONNECTED_RUNNER.md."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -461,6 +471,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.agent_server:
         from src.agent_server import run as _run_agent_server
         return _run_agent_server()
+
+    # Runner polling client: long-lived outbound HTTPS to the hosted
+    # SaaS. Same "no settings loaded yet" early-return rule as the
+    # agent server — handle_agent_job describes a broken environment
+    # rather than being killed by it.
+    if args.runner_poll:
+        from src.runner_poller import run as _run_runner_poll
+        return _run_runner_poll()
 
     settings = load_settings()
     ensure_dirs(settings)
