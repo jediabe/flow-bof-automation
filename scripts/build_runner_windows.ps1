@@ -211,9 +211,16 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host "Reusing existing venv at $VenvDir." -ForegroundColor Green
 }
 
-# 2. Upgrade pip.
-Write-Host "Upgrading pip..." -ForegroundColor Cyan
-& $VenvPython -m pip install --upgrade pip | Out-Null
+# 2. Pin pip to <26.
+#
+# pip 26.x (released late 2025) shipped a broken bundled distlib
+# that crashes on import inside ensurepip on Homebrew Python /
+# macOS Tahoe and has caused intermittent issues elsewhere. The
+# venv usually starts with pip 25.x from `python -m venv`; a bare
+# `--upgrade pip` would yank latest, including the broken 26.x.
+# Constrain to <26 until pip 26.x ships a working release.
+Write-Host "Pinning pip to <26..." -ForegroundColor Cyan
+& $VenvPython -m pip install --quiet "pip<26" | Out-Null
 
 # 3. Install runner deps.
 Write-Host "Installing requirements-runner.txt..." -ForegroundColor Cyan

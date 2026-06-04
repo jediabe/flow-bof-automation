@@ -162,8 +162,15 @@ fi
 # ---------------------------------------------------------------------
 # 2. Install deps
 # ---------------------------------------------------------------------
-echo "Upgrading pip..."
-"$VENV_PY" -m pip install --upgrade pip >/dev/null
+# Pin pip to <26. pip 26.x (released late 2025) shipped a broken
+# bundled distlib that crashes on import inside ensurepip on
+# Homebrew Python and on macOS Tahoe in general. Whatever the venv
+# already has from `python -m venv` is usually 25.x and works fine,
+# but `--upgrade pip` would yank the latest, including the broken
+# 26.x. The constraint keeps us on the stable 25.x line until pip
+# 26.x is fixed.
+echo "Pinning pip to <26..."
+"$VENV_PY" -m pip install --quiet "pip<26"
 
 echo "Installing requirements-runner.txt..."
 "$VENV_PIP" install -r "$REPO_ROOT/requirements-runner.txt"
