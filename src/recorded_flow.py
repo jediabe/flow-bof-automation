@@ -1346,10 +1346,19 @@ def _click_with_fallback(
         4. Coordinate click on the bounding-box centre via page.mouse.
     Returns None when every method failed.
     """
+    # IMPORTANT: every method needs an explicit timeout. Locator
+    # operations without a `timeout=` argument default to Playwright's
+    # global 30s, which on a sequence of 4 fallbacks means a single
+    # attempt can hang for >2 minutes — observed live on 2026-06-04
+    # where the overflow click stalled 67 seconds before retry-2
+    # succeeded instantly with a fresh hover. Caller passes the budget;
+    # we apply it uniformly so retry-and-rehover wins the race.
     methods: list[tuple[str, callable]] = [
         ("playwright_click", lambda: locator.click(timeout=timeout_ms)),
         ("force_click",      lambda: locator.click(timeout=timeout_ms, force=True)),
-        ("js_click",         lambda: locator.evaluate("el => el.click()")),
+        ("js_click",         lambda: locator.evaluate(
+            "el => el.click()", timeout=timeout_ms,
+        )),
     ]
     for name, fn in methods:
         try:
@@ -1361,7 +1370,7 @@ def _click_with_fallback(
 
     # Last resort: synthesize a coordinate click on the centre of the box.
     try:
-        box = locator.bounding_box()
+        box = locator.bounding_box(timeout=timeout_ms)
         if box and box["width"] > 0 and box["height"] > 0:
             cx = box["x"] + box["width"] / 2
             cy = box["y"] + box["height"] / 2

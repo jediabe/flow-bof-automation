@@ -916,6 +916,9 @@ def _handle_generate_flow_videos_from_favorites(
                         "Video failed for media_id=%s: %s — continuing batch.",
                         tile.flow_media_id, exc,
                     )
+                    _maybe_inspect_on_error(
+                        page, f"vid_{tile.flow_media_id}_recorded", logger,
+                    )
                     _record_item(tile, "failed", {
                         "code":    "RECORDED_FLOW_FAILED",
                         "message": str(exc),
@@ -939,6 +942,9 @@ def _handle_generate_flow_videos_from_favorites(
                     logger.error(
                         "Flow error for media_id=%s: %s — continuing batch.",
                         tile.flow_media_id, exc,
+                    )
+                    _maybe_inspect_on_error(
+                        page, f"vid_{tile.flow_media_id}_flow", logger,
                     )
                     _record_item(tile, "failed", {
                         "code":    "FLOW_AUTOMATION_ERROR",
@@ -964,6 +970,9 @@ def _handle_generate_flow_videos_from_favorites(
                         "Unexpected error animating media_id=%s "
                         "— continuing batch.",
                         tile.flow_media_id,
+                    )
+                    _maybe_inspect_on_error(
+                        page, f"vid_{tile.flow_media_id}_unexpected", logger,
                     )
                     _record_item(tile, "failed", {
                         "code":    "UNEXPECTED_ERROR",
@@ -1120,6 +1129,33 @@ def _infer_reference_image_ext(
 def _sanitize_item_id_for_filename(item_id: str) -> str:
     """Strip filename-unsafe chars from a SaaS Product.id (cuid)."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", item_id)[:120] or "item"
+
+
+def _maybe_inspect_on_error(
+    page,
+    label: str,
+    logger: logging.Logger,
+) -> None:
+    """Capture a Flow UI DOM dump when an item fails, *if* the
+    operator has opted in via `FLOW_INSPECT_ON_ERROR=true`.
+
+    Disabled by default so a hammered runner doesn't spray
+    inspection files on every transient hiccup. Late-imports the
+    inspector so paths that never error don't pay the JS-blob
+    cost. Never raises — diagnostics must not take down a runner.
+    """
+    try:
+        from .flow_inspector import (
+            is_inspect_on_error_enabled,
+            inspect_and_save_page,
+        )
+        if not is_inspect_on_error_enabled():
+            return
+        inspect_and_save_page(page, label=label)
+    except Exception as exc:  # noqa: BLE001
+        # The inspector itself swallows errors into its 'errors'
+        # field; if the import or wrapper failed, log and move on.
+        logger.warning("auto-inspect on error failed: %s", exc)
 
 
 def _redact_url_for_log(url: str) -> str:
@@ -1609,6 +1645,9 @@ def _handle_generate_flow_images(
                         "Image failed for item_id=%s: %s — continuing batch.",
                         item["item_id"], exc,
                     )
+                    _maybe_inspect_on_error(
+                        page, f"img_{item['item_id']}_recorded", logger,
+                    )
                     items_out.append({
                         "item_id":      item["item_id"],
                         "product_name": item["product_name"],
@@ -1640,6 +1679,9 @@ def _handle_generate_flow_images(
                         "Flow error for item_id=%s: %s — continuing batch.",
                         item["item_id"], exc,
                     )
+                    _maybe_inspect_on_error(
+                        page, f"img_{item['item_id']}_flow", logger,
+                    )
                     items_out.append({
                         "item_id":      item["item_id"],
                         "product_name": item["product_name"],
@@ -1670,6 +1712,9 @@ def _handle_generate_flow_images(
                     logger.exception(
                         "Unexpected error for item_id=%s — continuing batch.",
                         item["item_id"],
+                    )
+                    _maybe_inspect_on_error(
+                        page, f"img_{item['item_id']}_unexpected", logger,
                     )
                     items_out.append({
                         "item_id":      item["item_id"],

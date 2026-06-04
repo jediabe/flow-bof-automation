@@ -99,6 +99,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--inspect-flow",
+        action="store_true",
+        help=(
+            "Attach to the runner's Chrome, capture a comprehensive DOM "
+            "dump of the active Flow tab, and write JSON + text files to "
+            "the runner's data directory. Use this whenever a selector "
+            "starts failing — the dump shows exactly what the runner "
+            "sees and is paste-friendly for bug reports."
+        ),
+    )
+    p.add_argument(
         "--saas-url",
         default=None,
         help="Override the saved SaaS URL for this run + save.",
@@ -171,6 +182,22 @@ def do_diagnose() -> int:
     return diagnostics.run_all()
 
 
+def do_inspect_flow(cfg: RunnerConfig) -> int:
+    """Run the Flow UI inspector against the runner's Chrome.
+
+    Imports `flow_inspector` lazily so the rest of the runner CLI
+    paths (--diagnose, --setup, etc.) don't pay the Playwright
+    import cost just to print a help string. Returns the
+    inspector's exit code so the wrapper can pause on failure.
+    """
+    try:
+        from src.flow_inspector import run_inspector
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] Could not load flow_inspector: {exc}")
+        return 5
+    return run_inspector(chrome_port=cfg.chrome_debug_port)
+
+
 def do_open_browser(cfg: RunnerConfig) -> int:
     """Open (or refocus) Google Flow in the dedicated runner profile.
 
@@ -239,6 +266,7 @@ def interactive(cfg: RunnerConfig) -> int:
         ("run",     "Start runner"),
         ("open",    "Open/Reopen Google Flow browser"),
         ("diag",    "Run diagnostics"),
+        ("inspect", "Inspect Flow UI (DOM dump for bug reports)"),
         ("setup",   "Re-enter SaaS URL / runner token"),
         ("reset",   "Reset config (deletes saved settings)"),
         ("exit",    "Exit"),
@@ -249,6 +277,8 @@ def interactive(cfg: RunnerConfig) -> int:
         return do_open_browser(cfg)
     if choice == "diag":
         return do_diagnose()
+    if choice == "inspect":
+        return do_inspect_flow(cfg)
     if choice == "setup":
         do_setup()
         return 0
@@ -281,6 +311,10 @@ def main(argv: list[str] | None = None) -> int:
             cfg = load_config()
             cfg = _apply_overrides(cfg, args)
             return do_open_browser(cfg)
+        if args.inspect_flow:
+            cfg = load_config()
+            cfg = _apply_overrides(cfg, args)
+            return do_inspect_flow(cfg)
 
         cfg = load_config()
         cfg = _apply_overrides(cfg, args)
