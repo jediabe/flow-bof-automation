@@ -386,10 +386,32 @@ class RunnerGUI:
         self.root.bind("<<RunnerLog>>", self._drain_log_queue)
         # Same pattern for update-check / download callbacks.
         self.root.bind("<<UpdateEvent>>", self._drain_update_queue)
+        # FALLBACK: poll the update queue every 200ms regardless of
+        # event_generate. On macOS Tahoe + Tk 9.0, event_generate
+        # called from a worker thread sometimes queues the event but
+        # the Cocoa main loop doesn't actually deliver it (race or
+        # bug in Tk 9.0's Cocoa integration — the canonical "Tk
+        # event_generate from another thread is safe" guidance does
+        # not hold up here). The poll guarantees the drainer runs
+        # even when the event channel doesn't.
+        self.root.after(200, self._tick_drain_update_queue)
         # Periodic process-status poll. 1s is fine — only matters for
         # detecting an unexpected subprocess exit; live logs come
         # through the event channel.
         self.root.after(1000, self._tick_process_status)
+
+    def _tick_drain_update_queue(self) -> None:
+        """200ms tick that drains the update queue on the main
+        thread. Belt-and-suspenders with the <<UpdateEvent>>
+        binding — if event_generate delivery is broken on this
+        platform, this still wakes the drainer."""
+        if not self.update_queue.empty():
+            self._drain_update_queue()
+        try:
+            self.root.after(200, self._tick_drain_update_queue)
+        except tk.TclError:
+            # Tk torn down — stop the tick chain.
+            pass
 
     # ----- Subprocess lifecycle ---------------------------------------
 
@@ -588,15 +610,27 @@ class RunnerGUI:
             return
 
     def _drain_update_queue(self, _event: tk.Event | None = None) -> None:
-        """Main-thread handler for <<UpdateEvent>>. Drains the queue
-        and invokes each callback. Exceptions are logged + traced so
-        a single bad callback doesn't take down later ones."""
+        """Main-thread handler for <<UpdateEvent>> AND the 200ms
+        polling tick. Drains the queue and invokes each callback.
+        Exceptions are logged + traced so a single bad callback
+        doesn't take down later ones."""
         import traceback
+        source = "event" if _event is not None else "poll"
+        drained_any = False
         while True:
             try:
                 fn, args = self.update_queue.get_nowait()
             except queue.Empty:
                 break
+            if not drained_any:
+                # Print only when there's actually work — keeps the
+                # 200ms tick silent in the happy idle case.
+                print(
+                    f"[update-drainer] firing via {source}, "
+                    f"first callback: {getattr(fn, '__name__', fn)}",
+                    file=sys.stderr, flush=True,
+                )
+                drained_any = True
             try:
                 fn(*args)
             except Exception as exc:  # noqa: BLE001
