@@ -144,6 +144,143 @@ def _locate_file_input(page: Page) -> Locator:
     return page.locator('input[type="file"]').first
 
 
+_PLUS_BUTTON_PICKER_JS = r"""
+() => {
+  // The composer "+" / attachment button is always the LEFTMOST
+  // button on the same visual row as the textbox, after excluding
+  // the Agent pill, the settings pill (crop_*), the send arrow
+  // (arrow_forward), variant tabs (1x/2x/3x/4x), and any button
+  // that contains a model name. We can't rely on icon ligatures
+  // (they change between Flow builds) or on DOM order alone
+  // (`preceding::button[1]` returns the Agent pill, which sits
+  // immediately before the textbox in document order).
+  const textbox = document.querySelector(
+    'div[role="textbox"][contenteditable="true"]'
+  );
+  if (!textbox) return {error: 'no contenteditable textbox'};
+  let scope = textbox;
+  for (let i = 0; i < 6 && scope.parentElement; i++) {
+    scope = scope.parentElement;
+  }
+  const tbRect = textbox.getBoundingClientRect();
+
+  const isVisible = el => {
+    const r = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    return r.width > 0 && r.height > 0 &&
+           cs.visibility !== 'hidden' && cs.display !== 'none';
+  };
+
+  const isSameRow = el => {
+    const r = el.getBoundingClientRect();
+    // Same visual row as the textbox (allows a generous band so
+    // we still pick the + even when the composer is multiline).
+    return !(r.bottom < tbRect.top - 20 || r.top > tbRect.bottom + 80);
+  };
+
+  const isRejected = el => {
+    const text = ((el.innerText || el.textContent || '')
+                  .trim().toLowerCase());
+    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+    if (text === 'agent' || aria === 'agent') return 'agent';
+    if (aria.includes('send') || text.includes('arrow_forward')) return 'send';
+    if (text.includes('crop_') || aria.includes('settings')) return 'settings_pill';
+    if (text.includes('nano banana') || text.includes('veo')) return 'model_name';
+    if (/^\s*[1-9]x\s*$/.test(text)) return 'variant_tab';
+    if (text.includes('add to prompt')) return 'add_to_prompt';
+    return null;
+  };
+
+  const buttons = Array.from(scope.querySelectorAll('button'))
+    .filter(isVisible);
+  const sameRow = buttons.filter(isSameRow);
+  const filtered = [];
+  const rejected = [];
+  for (const b of sameRow) {
+    const reason = isRejected(b);
+    if (reason) {
+      rejected.push({
+        text: (b.innerText || b.textContent || '').slice(0, 30).trim(),
+        aria: b.getAttribute('aria-label'),
+        reason,
+      });
+    } else {
+      filtered.push(b);
+    }
+  }
+
+  if (filtered.length === 0) {
+    return {
+      error: 'no candidates after reject filter',
+      scanned: buttons.length,
+      same_row: sameRow.length,
+      rejected,
+    };
+  }
+  filtered.sort((a, b) =>
+    a.getBoundingClientRect().left - b.getBoundingClientRect().left
+  );
+  const winner = filtered[0];
+  // Strip any stale marker from a previous call so the locator
+  // can't accidentally bind to the wrong button.
+  scope.querySelectorAll('[data-flow-bof-plus]').forEach(
+    e => e.removeAttribute('data-flow-bof-plus')
+  );
+  winner.setAttribute('data-flow-bof-plus', '1');
+  const wr = winner.getBoundingClientRect();
+  return {
+    ok: true,
+    text: (winner.innerText || winner.textContent || '').slice(0, 60).trim(),
+    aria_label: winner.getAttribute('aria-label'),
+    role: winner.getAttribute('role'),
+    rect: {
+      x: Math.round(wr.x), y: Math.round(wr.y),
+      w: Math.round(wr.width), h: Math.round(wr.height),
+    },
+    class_name: (winner.className || '').toString().slice(0, 80),
+    candidates_considered: filtered.length,
+    rejected_count: rejected.length,
+  };
+}
+"""
+
+
+def _locate_plus_button_via_js(page: Page) -> Locator:
+    """Pick the composer + button by visual position, not by text
+    or DOM-order. Tags the chosen element with
+    `data-flow-bof-plus="1"` and returns a locator bound to that
+    attribute. Robust to Material icon renames and to additional
+    composer-toolbar buttons being added next to the textbox.
+
+    Raises PlaywrightTimeoutError when no candidate matches so
+    the existing strategy-loop falls through to the diagnostic
+    dump.
+    """
+    log = logging.getLogger("flow_bof")
+    result = page.evaluate(_PLUS_BUTTON_PICKER_JS)
+    if not isinstance(result, dict):
+        log.info("plus-button JS picker: unexpected result type %s", type(result))
+        raise PlaywrightTimeoutError("JS picker returned non-dict")
+    if result.get("error"):
+        log.info(
+            "plus-button JS picker: %s (scanned=%s same_row=%s rejected=%s)",
+            result.get("error"),
+            result.get("scanned"),
+            result.get("same_row"),
+            result.get("rejected"),
+        )
+        raise PlaywrightTimeoutError(f"JS picker: {result['error']}")
+    log.info(
+        "plus-button JS picker selected: text=%r aria=%r rect=%s (of %d candidate(s); rejected %d)",
+        result.get("text"),
+        result.get("aria_label"),
+        result.get("rect"),
+        result.get("candidates_considered"),
+        result.get("rejected_count"),
+    )
+    return page.locator('[data-flow-bof-plus="1"]').first
+
+
 _COMPOSER_BUTTON_DUMP_JS = r"""
 () => {
   const textbox = document.querySelector('div[role="textbox"][contenteditable="true"]');
@@ -218,10 +355,21 @@ def _locate_plus_button(page: Page) -> Locator:
     """
     log = logging.getLogger("flow_bof")
     strategies: list[tuple[str, "callable[[], Locator]"]] = [
-        # 1) aria-label is the most stable surface — Flow's accessible
-        # labels survive icon-name churn. Exclude the "Add to Prompt"
-        # button which lives in the upload popover (matches the same
-        # 'add' substring).
+        # 1) Visual-position picker. The composer + is always the
+        # leftmost button on the textbox's row that ISN'T the Agent
+        # pill / settings pill / send arrow / variant tab / model
+        # name. This handles icon-only buttons with no aria-label
+        # and survives Material ligature renames. Runs first because
+        # it's the most reliable; everything else is a fallback for
+        # builds where the textbox query fails.
+        (
+            "JS picker (leftmost composer-row non-target)",
+            lambda: _locate_plus_button_via_js(page),
+        ),
+        # 2) aria-label is the next most stable surface — Flow's
+        # accessible labels survive icon-name churn. Exclude the
+        # "Add to Prompt" button which lives in the upload popover
+        # (matches the same 'add' substring).
         (
             "button[aria-label*='Add' i] not 'Prompt'",
             lambda: page.locator(
@@ -236,7 +384,7 @@ def _locate_plus_button(page: Page) -> Locator:
             "button[aria-label*='Insert' i]",
             lambda: page.locator("button[aria-label*='insert' i]"),
         ),
-        # 2) Ligature fallbacks — current text could be any common
+        # 3) Ligature fallbacks — current text could be any common
         # Material icon name for a "+" glyph.
         (
             "button:has-text /^(add_2|add|add_circle|add_box|plus|attach_file)$/",
@@ -246,15 +394,6 @@ def _locate_plus_button(page: Page) -> Locator:
                     re.I,
                 )
             ),
-        ),
-        # 3) Structural: the composer textbox's nearest preceding
-        # button on the same row. Works even with an icon-only SVG
-        # that has no aria-label.
-        (
-            "preceding::button[1] of textbox",
-            lambda: page.locator(
-                'div[role="textbox"][contenteditable="true"]'
-            ).locator("xpath=preceding::button[1]"),
         ),
     ]
 
