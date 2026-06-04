@@ -48,6 +48,7 @@ same binary it lives inside. One spec, one exe, dual-mode.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import signal
@@ -57,9 +58,40 @@ import threading
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
+import urllib.error
+import urllib.request
+import webbrowser
 from pathlib import Path
 from tkinter import ttk
 from typing import Optional
+
+
+# ---------------------------------------------------------------------
+# Update check (GitHub Releases API)
+# ---------------------------------------------------------------------
+# Public read endpoint; no auth needed. Rate-limited to 60/hr for
+# unauth callers — fine for a manual button. The check NEVER auto-
+# downloads or replaces the running binary — it just compares the
+# embedded APP_VERSION to the latest release tag and pops a modal so
+# the user can open the release page in their browser and update
+# manually.
+GITHUB_RELEASES_API = (
+    "https://api.github.com/repos/jediabe/flow-bof-automation/releases/latest"
+)
+GITHUB_RELEASES_PAGE = (
+    "https://github.com/jediabe/flow-bof-automation/releases"
+)
+
+
+def _runner_version() -> str:
+    """Return the embedded APP_VERSION so we can compare against the
+    GitHub release tag. Late-import keeps the import cost out of the
+    GUI startup path."""
+    try:
+        from src.agent_api import APP_VERSION  # type: ignore
+        return str(APP_VERSION)
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 # ---------------------------------------------------------------------
@@ -265,6 +297,11 @@ class RunnerGUI:
         )
         self.btn_setup.pack(side=tk.LEFT, padx=(8, 0))
 
+        self.btn_update = ttk.Button(
+            buttons, text="Check for updates", command=self._on_check_updates,
+        )
+        self.btn_update.pack(side=tk.RIGHT)
+
         # Log panel — monospace, dark background, scrolled.
         log_frame = ttk.Frame(r, padding=(16, 0, 16, 16))
         log_frame.pack(fill=tk.BOTH, expand=True)
@@ -385,6 +422,113 @@ class RunnerGUI:
 
     def _on_inspect(self) -> None:
         self._run_oneshot(["--inspect-flow"], "inspect Flow UI")
+
+    def _on_check_updates(self) -> None:
+        """Fetch latest GitHub release tag, compare to embedded
+        APP_VERSION, offer the release page in the user's browser
+        if a newer version is published.
+
+        Runs the HTTP fetch on a background thread so the Tk
+        mainloop never blocks. Modal dialogs are posted back to
+        the main thread via `after(0, ...)` so Tk only touches
+        widgets from its own thread.
+        """
+        self.btn_update.state(["disabled"])
+        self._append_log("[gui] checking for updates...\n")
+        threading.Thread(
+            target=self._update_check_worker,
+            name="update-check",
+            daemon=True,
+        ).start()
+
+    def _update_check_worker(self) -> None:
+        current = _runner_version().lstrip("v").strip()
+        try:
+            req = urllib.request.Request(
+                GITHUB_RELEASES_API,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": f"FlowBOFRunner/{current}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            self._post(self._update_check_failed, f"GitHub returned HTTP {exc.code}")
+            return
+        except urllib.error.URLError as exc:
+            self._post(self._update_check_failed, f"Network error: {exc.reason}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._post(self._update_check_failed, f"{type(exc).__name__}: {exc}")
+            return
+
+        latest_tag = (payload.get("tag_name") or "").strip()
+        release_url = (payload.get("html_url") or GITHUB_RELEASES_PAGE).strip()
+        latest_normalized = latest_tag.lstrip("v").strip()
+        if not latest_normalized:
+            self._post(
+                self._update_check_failed,
+                "Latest release has no tag_name field.",
+            )
+            return
+
+        self._post(
+            self._update_check_finished,
+            current, latest_normalized, release_url,
+        )
+
+    def _post(self, fn, *args) -> None:
+        """Schedule `fn(*args)` to run on the Tk main thread. Safe
+        from any thread because Tk's `after` is the documented
+        cross-thread channel."""
+        self.root.after(0, lambda: fn(*args))
+
+    def _update_check_failed(self, reason: str) -> None:
+        self.btn_update.state(["!disabled"])
+        self._append_log(f"[gui] update check failed: {reason}\n", tag="warn")
+        messagebox.showwarning(
+            "Update check failed",
+            f"Could not check for updates.\n\n{reason}\n\n"
+            f"You can browse releases manually:\n{GITHUB_RELEASES_PAGE}",
+        )
+
+    def _update_check_finished(
+        self, current: str, latest: str, release_url: str,
+    ) -> None:
+        self.btn_update.state(["!disabled"])
+        self._append_log(
+            f"[gui] update check: local v{current} / latest v{latest}\n",
+        )
+        if current == latest:
+            messagebox.showinfo(
+                "Up to date",
+                f"You're running v{current}, which matches the latest "
+                f"published release.",
+            )
+            return
+        # Version strings differ. Don't try to be clever about which
+        # is "newer" — pre-release / alpha / build-suffix tags break
+        # naive comparisons. Show both, let the user decide.
+        if messagebox.askyesno(
+            "Update check",
+            f"Your runner:    v{current}\n"
+            f"Latest release: v{latest}\n\n"
+            f"Open the release page in your browser?\n"
+            f"(Downloads + replaces are manual — your token + config "
+            f"survive the swap.)",
+            default=messagebox.YES,
+        ):
+            try:
+                webbrowser.open(release_url)
+            except Exception as exc:  # noqa: BLE001
+                self._append_log(
+                    f"[gui] could not open browser: {exc}\n", tag="warn",
+                )
+                messagebox.showinfo(
+                    "Open this URL",
+                    f"Your browser didn't open. Copy this URL:\n\n{release_url}",
+                )
 
     def _on_setup(self) -> None:
         # Setup needs stdin. Tk can't easily give a subprocess an

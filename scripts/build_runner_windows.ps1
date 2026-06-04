@@ -41,6 +41,31 @@ Write-Host " Flow BOF Runner -- Windows build" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
+# 0. Pull latest code (skip with -NoPull)
+#
+# Without this, repeat builds on a stale checkout silently produce
+# an OLD runner. --ff-only refuses to merge or rebase so a user with
+# uncommitted local changes gets a clear failure and can decide what
+# to do. Pass -NoPull to this script to skip the step for offline /
+# detached-HEAD builds.
+$NoPull = $args -contains '-NoPull' -or $args -contains '--no-pull'
+if ($NoPull) {
+    Write-Host "Skipping git pull (-NoPull)."
+} elseif (Test-Path (Join-Path $RepoRoot ".git")) {
+    Write-Host "Pulling latest code (git pull --ff-only)..."
+    git -C $RepoRoot pull --ff-only
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "[FAIL] git pull --ff-only failed." -ForegroundColor Red
+        Write-Host "       Either commit/stash local changes, or re-run with"
+        Write-Host "       -NoPull to build off the current checkout."
+        exit 1
+    }
+} else {
+    Write-Host "Not a git checkout -- skipping pull."
+}
+Write-Host ""
+
 # 1. Find a Python to bootstrap the venv. Prefer the `py` launcher
 #    (it knows about every installed Python); fall back to `python`
 #    on PATH. We need 3.10+ for the typing syntax used in

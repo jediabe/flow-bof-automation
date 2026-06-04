@@ -351,6 +351,24 @@ def main(argv: list[str] | None = None) -> int:
                 cfg = prompt_for_missing(cfg)
                 save_config(cfg)
             return do_run(cfg)
+
+        # No specific action AND no TTY attached → the user almost
+        # certainly double-clicked the .app from Finder (or the .exe
+        # from Explorer with no console). The interactive menu can't
+        # accept input in that state, so default to the GUI instead.
+        # CLI invocations from PowerShell / Terminal keep getting the
+        # console menu (stdin IS a TTY there).
+        if not (sys.stdin and sys.stdin.isatty()):
+            try:
+                import runner_gui
+                return runner_gui.main()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[FAIL] No-TTY launch + GUI fallback failed: {exc}",
+                    file=sys.stderr,
+                )
+                return 6
+
         return interactive(cfg)
     except KeyboardInterrupt:
         # Graceful shutdown — runner_poller's signal handler has

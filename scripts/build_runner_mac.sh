@@ -53,6 +53,36 @@ echo "============================================================"
 echo
 
 # ---------------------------------------------------------------------
+# 0. Pull latest code (skip with --no-pull)
+# ---------------------------------------------------------------------
+# Without this, repeat builds on a stale checkout silently produce an
+# OLD runner. --ff-only refuses to merge or rebase so a user with
+# uncommitted local changes gets a clear failure and can decide what
+# to do. --no-pull skips the step for offline / detached-HEAD builds.
+SKIP_PULL=false
+for arg in "$@"; do
+  if [[ "$arg" == "--no-pull" ]]; then
+    SKIP_PULL=true
+  fi
+done
+
+if [[ "$SKIP_PULL" == "true" ]]; then
+  echo "Skipping git pull (--no-pull)."
+elif [[ -d "$REPO_ROOT/.git" ]]; then
+  echo "Pulling latest code (git pull --ff-only)..."
+  if ! git -C "$REPO_ROOT" pull --ff-only; then
+    echo
+    echo "[FAIL] git pull --ff-only failed."
+    echo "       Either commit/stash local changes, or re-run with"
+    echo "       --no-pull to build off the current checkout."
+    exit 1
+  fi
+else
+  echo "Not a git checkout — skipping pull."
+fi
+echo
+
+# ---------------------------------------------------------------------
 # 1. Pick a Python (3.10..3.13 preferred; 3.14 sometimes lacks wheels)
 # ---------------------------------------------------------------------
 # Prefer the most wheel-friendly minor versions; fall back to whatever
