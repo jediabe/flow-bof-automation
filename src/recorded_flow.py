@@ -82,9 +82,59 @@ def _locate_variants_1x_tab(page: Page) -> Locator:
     return page.get_by_role("tab", name="1x").first
 
 
+def _locate_image_mode_tab(page: Page) -> Locator:
+    # The settings popover has top-level "Image" / "Video" tabs.
+    # Selecting "Image" is required before the Nano Banana Pro model
+    # option is rendered — see image 5 in the 2026-06-04 regression
+    # report. The popover defaults to whichever mode the composer
+    # was last in; a fresh "New project" often opens on Video.
+    return page.get_by_role(
+        "tab", name=re.compile(r"^\s*image\s*$", re.I),
+    ).first
+
+
 def _locate_model_nano_banana_pro(page: Page) -> Locator:
-    # Recorded as <span> at (1003, 866) with text "🍌 Nano Banana Pro".
-    return page.locator("span").filter(has_text="Nano Banana Pro").first
+    """Multi-strategy lookup for the Nano Banana Pro model option.
+
+    The recording captured this as a <span>, but Flow has since
+    rewrapped the picker — depending on build it surfaces as a
+    Radix combobox button, a <button> containing the model name,
+    a role="option" inside an open dropdown, or the legacy span.
+    Try each shape in priority order; the first visible match wins.
+
+    Never raises directly — when nothing resolves, returns the
+    legacy span locator so the caller's existing click() will fail
+    with a familiar PlaywrightTimeoutError that the warning path
+    in _apply_project_settings already handles.
+    """
+    log = logging.getLogger("flow_bof")
+    name_re = re.compile(r"Nano\s+Banana\s+Pro", re.I)
+    strategies: list[tuple[str, "callable[[], Locator]"]] = [
+        ("get_by_role(option, name~Nano Banana Pro)",
+         lambda: page.get_by_role("option", name=name_re)),
+        ("get_by_role(menuitem, name~Nano Banana Pro)",
+         lambda: page.get_by_role("menuitem", name=name_re)),
+        ("get_by_role(button, name~Nano Banana Pro)",
+         lambda: page.get_by_role("button", name=name_re)),
+        ("button:has-text(/Nano Banana Pro/i)",
+         lambda: page.locator("button").filter(has_text=name_re)),
+        ("span:has-text(/Nano Banana Pro/i)  [legacy]",
+         lambda: page.locator("span").filter(has_text=name_re)),
+    ]
+    for label, build in strategies:
+        try:
+            locator = build().first
+            locator.wait_for(state="visible", timeout=2_000)
+            log.info("Nano Banana Pro resolved via: %s", label)
+            return locator
+        except (PlaywrightTimeoutError, AssertionError):
+            continue
+    log.warning(
+        "Nano Banana Pro: no strategy resolved a visible match — "
+        "falling back to legacy span locator (click will likely "
+        "timeout). Are you on the Image tab in the settings popover?"
+    )
+    return page.locator("span").filter(has_text=name_re).first
 
 
 def _locate_file_input(page: Page) -> Locator:
@@ -94,12 +144,138 @@ def _locate_file_input(page: Page) -> Locator:
     return page.locator('input[type="file"]').first
 
 
+_COMPOSER_BUTTON_DUMP_JS = r"""
+() => {
+  const textbox = document.querySelector('div[role="textbox"][contenteditable="true"]');
+  if (!textbox) return {error: "no contenteditable textbox found"};
+  // Walk up a few levels so the dump scope covers the whole
+  // composer toolbar (the textbox itself is just one row).
+  let scope = textbox;
+  for (let i = 0; i < 6 && scope.parentElement; i++) {
+    scope = scope.parentElement;
+  }
+  const buttons = Array.from(scope.querySelectorAll('button')).slice(0, 16);
+  return buttons.map(b => {
+    const rect = b.getBoundingClientRect();
+    const cs = window.getComputedStyle(b);
+    return {
+      text: (b.innerText || b.textContent || '').slice(0, 60).trim(),
+      aria_label: b.getAttribute('aria-label'),
+      role: b.getAttribute('role'),
+      visible:
+        rect.width > 0 && rect.height > 0 &&
+        cs.visibility !== 'hidden' && cs.display !== 'none',
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        w: Math.round(rect.width), h: Math.round(rect.height),
+      },
+      class_name: (b.className || '').toString().slice(0, 80),
+    };
+  });
+}
+"""
+
+
+def _dump_composer_buttons(page: Page, log: logging.Logger) -> None:
+    """Log every button in the composer toolbar for triage.
+
+    Called when `_locate_plus_button` exhausts every strategy. The
+    output goes straight into the runner log so we don't need a
+    devtools session to figure out which button selector to add.
+    """
+    try:
+        result = page.evaluate(_COMPOSER_BUTTON_DUMP_JS)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("composer-button dump failed: %s", exc)
+        return
+    if isinstance(result, dict) and result.get("error"):
+        log.warning("composer-button dump: %s", result["error"])
+        return
+    log.info("Composer-area buttons (%d):", len(result))
+    for b in result:
+        log.info(
+            "  <button aria=%s role=%s vis=%s rect=%s class=%s> %r",
+            b.get("aria_label") or "-",
+            b.get("role") or "-",
+            b.get("visible"),
+            b.get("rect"),
+            b.get("class_name") or "-",
+            b.get("text"),
+        )
+
+
 def _locate_plus_button(page: Page) -> Locator:
-    # Recorded at (698, 918) with combined text "add_2\nCreate".
-    # "add_2" is the Material Symbols icon ligature rendered as text; it
-    # is unique to this button (the bottom-right arrow button shares the
-    # label "Create" but uses the "arrow_forward" ligature instead).
-    return page.locator("button").filter(has_text="add_2").first
+    """Robust composer "+" / attachment button lookup.
+
+    The recording matched on the Material Symbols ligature "add_2"
+    rendered as literal text inside the button. Subsequent Flow
+    builds have renamed that ligature (commonly to "add", sometimes
+    swapped for an inline SVG with no text at all). Try a sequence
+    of selectors anchored on aria-label and structural position,
+    then fall back to ligature-name variants. When every strategy
+    misses we dump the composer-area button list so the next debug
+    cycle has real DOM data instead of guesses.
+    """
+    log = logging.getLogger("flow_bof")
+    strategies: list[tuple[str, "callable[[], Locator]"]] = [
+        # 1) aria-label is the most stable surface — Flow's accessible
+        # labels survive icon-name churn. Exclude the "Add to Prompt"
+        # button which lives in the upload popover (matches the same
+        # 'add' substring).
+        (
+            "button[aria-label*='Add' i] not 'Prompt'",
+            lambda: page.locator(
+                "button[aria-label*='add' i]:not([aria-label*='prompt' i])"
+            ),
+        ),
+        (
+            "button[aria-label*='Attach' i]",
+            lambda: page.locator("button[aria-label*='attach' i]"),
+        ),
+        (
+            "button[aria-label*='Insert' i]",
+            lambda: page.locator("button[aria-label*='insert' i]"),
+        ),
+        # 2) Ligature fallbacks — current text could be any common
+        # Material icon name for a "+" glyph.
+        (
+            "button:has-text /^(add_2|add|add_circle|add_box|plus|attach_file)$/",
+            lambda: page.locator("button").filter(
+                has_text=re.compile(
+                    r"^\s*(add_2|add|add_circle|add_box|plus|attach_file)\s*$",
+                    re.I,
+                )
+            ),
+        ),
+        # 3) Structural: the composer textbox's nearest preceding
+        # button on the same row. Works even with an icon-only SVG
+        # that has no aria-label.
+        (
+            "preceding::button[1] of textbox",
+            lambda: page.locator(
+                'div[role="textbox"][contenteditable="true"]'
+            ).locator("xpath=preceding::button[1]"),
+        ),
+    ]
+
+    last_error: Exception | None = None
+    for label, build in strategies:
+        try:
+            locator = build().first
+            locator.wait_for(state="visible", timeout=3_000)
+            log.info("Composer plus resolved via: %s", label)
+            return locator
+        except (PlaywrightTimeoutError, AssertionError) as exc:
+            last_error = exc
+            log.info("  strategy missed: %s (%s)", label, _short_err(exc))
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            log.info("  strategy errored: %s (%s)", label, _short_err(exc))
+
+    _dump_composer_buttons(page, log)
+    raise RecordedFlowError(
+        f"Composer + button not found by any strategy. Last error: {last_error}"
+    )
 
 
 def _locate_add_to_prompt(page: Page) -> Locator:
@@ -532,6 +708,31 @@ def _apply_project_settings(
             "variant/model selection. Re-record if Flow's UI has changed.", exc
         )
         return
+
+    # The popover defaults to whichever mode the composer was last
+    # in. A fresh "New project" or a recent video flow can land it on
+    # the Video tab, which hides the Nano Banana Pro model option
+    # entirely (Veo 3.x is shown instead). Click the Image tab first
+    # so the aspect/variant/model loop below sees the image controls.
+    # Best-effort: skip silently if the tab is already selected or
+    # the role isn't found (older builds don't have the Image/Video
+    # split).
+    try:
+        image_tab = _locate_image_mode_tab(page)
+        if image_tab.is_visible(timeout=500):
+            selected = (image_tab.get_attribute("aria-selected") or "").lower()
+            if selected != "true":
+                image_tab.click(timeout=selector_timeout_ms)
+                logger.info("Selected Image tab in settings popover")
+                page.wait_for_timeout(150)
+    except (PlaywrightTimeoutError, AssertionError):
+        # Older Flow build with no Image/Video tab; nothing to do.
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Image-tab pre-select skipped (%s); continuing — aspect/"
+            "variant clicks usually work on either tab.", exc,
+        )
 
     for label, locator_fn in (
         ("aspect 9:16", _locate_aspect_9_16_tab),
