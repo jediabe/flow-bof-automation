@@ -104,6 +104,26 @@ choose_python() {
   return 1
 }
 
+# Validate any pre-existing venv's Python version. If it's < 3.10
+# (typically Apple's bundled 3.9.6 picked up on a first build before
+# Python 3.12 was installed), nuke it and recreate — otherwise the
+# script silently reuses a Python that can't build a working
+# Tkinter on macOS Tahoe 26+ (Apple's bundled Tk is frozen at a
+# pre-Tahoe version and bails with "macOS 26 (2602) required, have
+# instead 16 (1602)" when the .app's GUI launches).
+if [[ -x "$VENV_PY" ]]; then
+  EXISTING_VER=$("$VENV_PY" -c 'import sys; print("{0}.{1}".format(sys.version_info[0], sys.version_info[1]))' 2>/dev/null || echo "0.0")
+  EX_MAJ=${EXISTING_VER%.*}
+  EX_MIN=${EXISTING_VER#*.}
+  if [[ "$EX_MAJ" != "3" || "$EX_MIN" -lt 10 ]]; then
+    echo "[WARN] Existing venv has Python $EXISTING_VER (< 3.10). Recreating."
+    echo "       (Apple's system Python 3.9.6 ships a frozen Tk that"
+    echo "       doesn't support macOS Tahoe; the .app GUI silently"
+    echo "       refuses to launch.)"
+    rm -rf "$VENV_DIR"
+  fi
+fi
+
 if [[ ! -x "$VENV_PY" ]]; then
   PY=$(choose_python || true)
   if [[ -z "${PY:-}" ]]; then
@@ -125,7 +145,18 @@ if [[ ! -x "$VENV_PY" ]]; then
   echo "Creating venv at $VENV_DIR (using $PY $PY_VER)..."
   "$PY" -m venv "$VENV_DIR"
 else
-  echo "Reusing existing venv at $VENV_DIR."
+  EXISTING_VER=$("$VENV_PY" -c 'import sys; print("{0}.{1}".format(sys.version_info[0], sys.version_info[1]))' 2>/dev/null || echo "?")
+  echo "Reusing existing venv at $VENV_DIR (Python $EXISTING_VER)."
+fi
+
+# Also force MACOSX_DEPLOYMENT_TARGET=11.0 unless the caller has
+# already set one. This keeps the bundled .app loadable on every
+# macOS from Big Sur (Nov 2020) forward — without it, pip wheels
+# can stamp a too-new minos that makes the .app refuse to load on
+# older Macs your end users may have.
+if [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
+  export MACOSX_DEPLOYMENT_TARGET=11.0
+  echo "MACOSX_DEPLOYMENT_TARGET defaulted to 11.0 (Big Sur)."
 fi
 
 # ---------------------------------------------------------------------
