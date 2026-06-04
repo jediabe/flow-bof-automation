@@ -211,6 +211,14 @@ class RunnerGUI:
         self.proc: Optional[subprocess.Popen[str]] = None
         self.reader_thread: Optional[threading.Thread] = None
         self.log_queue: "queue.Queue[str]" = queue.Queue(maxsize=2000)
+        # Cross-thread channel for update-check / download callbacks.
+        # Workers put (fn, args) tuples; the <<UpdateEvent>> handler
+        # drains and invokes on the Tk main thread. Using a queue +
+        # event_generate instead of `root.after(0, ...)` because the
+        # latter silently drops callbacks from non-main threads on
+        # macOS Tahoe + Tk 9.0 (root.after is not actually documented
+        # thread-safe; event_generate is).
+        self.update_queue: "queue.Queue[tuple]" = queue.Queue(maxsize=128)
         self.log_lines: list[str] = []
         self._max_log_lines = 200  # bound the on-screen tail
         self._current_status = "stopped"  # stopped | running | working
@@ -376,6 +384,8 @@ class RunnerGUI:
         # The reader thread fires this from outside the main thread;
         # Tk handles serialisation. We drain the queue when we wake.
         self.root.bind("<<RunnerLog>>", self._drain_log_queue)
+        # Same pattern for update-check / download callbacks.
+        self.root.bind("<<UpdateEvent>>", self._drain_update_queue)
         # Periodic process-status poll. 1s is fine — only matters for
         # detecting an unexpected subprocess exit; live logs come
         # through the event channel.
@@ -512,10 +522,58 @@ class RunnerGUI:
         )
 
     def _post(self, fn, *args) -> None:
-        """Schedule `fn(*args)` to run on the Tk main thread. Safe
-        from any thread because Tk's `after` is the documented
-        cross-thread channel."""
-        self.root.after(0, lambda: fn(*args))
+        """Schedule `fn(*args)` to run on the Tk main thread.
+
+        Uses a thread-safe queue + `event_generate` to marshal the
+        callback to the main thread. Originally this was a one-liner
+        `self.root.after(0, lambda: fn(*args))`, which appeared to
+        work on Linux + Windows + older macOS but silently drops
+        callbacks on macOS Tahoe with Tk 9.0 (root.after is NOT
+        documented thread-safe; event_generate is). The same pattern
+        already used for runner stdout streaming.
+        """
+        try:
+            self.update_queue.put_nowait((fn, args))
+        except queue.Full:
+            # Drop oldest so a runaway producer can't deadlock UI
+            # updates. Should never trigger in practice (the queue
+            # holds 128 items and producers are infrequent).
+            try:
+                self.update_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.update_queue.put_nowait((fn, args))
+            except queue.Full:
+                return
+        try:
+            self.root.event_generate("<<UpdateEvent>>", when="tail")
+        except (tk.TclError, RuntimeError):
+            # Tk has been torn down (window closing) — nothing to
+            # post to anymore.
+            return
+
+    def _drain_update_queue(self, _event: tk.Event | None = None) -> None:
+        """Main-thread handler for <<UpdateEvent>>. Drains the queue
+        and invokes each callback. Exceptions are logged + traced so
+        a single bad callback doesn't take down later ones."""
+        import traceback
+        while True:
+            try:
+                fn, args = self.update_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args)
+            except Exception as exc:  # noqa: BLE001
+                self._append_log(
+                    f"[gui] update callback failed: "
+                    f"{type(exc).__name__}: {exc}\n",
+                    tag="error",
+                )
+                # Also print full traceback to stderr so it shows in
+                # the launching Terminal during dev (`python runner_gui.py`).
+                traceback.print_exc()
 
     def _update_check_failed(self, reason: str) -> None:
         self.btn_update.state(["!disabled"])
