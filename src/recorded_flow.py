@@ -63,12 +63,48 @@ def _locate_new_project_button(page: Page) -> Locator:
 
 
 def _locate_project_settings_trigger(page: Page) -> Locator:
-    # Recorded at (1087, 917) with text "🍌 Nano Banana 2\ncrop_16_9\nx2"
-    # — a composer-toolbar button that summarises the active model,
-    # aspect ratio, and variant count. Content is variable, but "crop_"
-    # (Material icon ligature for the aspect glyph) is always present in
-    # the trigger before the popover opens. `.first` because once the
-    # popover is open, the aspect tabs inside it also contain "crop_".
+    """Composer-toolbar pill that summarises the active model,
+    aspect ratio, and variant count. Clicking it opens the
+    settings popover with Image/Video tabs.
+
+    The recorded selector matched on the "crop_" Material icon
+    ligature (the aspect glyph used to render as "crop_9_16",
+    "crop_16_9", etc.). Flow re-skinned the pill on 2026-06-04:
+    aspect is now a phone-shape icon, no "crop_" text. The new
+    invariant the pill always carries is **the active model name**
+    — match on that first, with the legacy ligature as a fallback
+    so older builds still work.
+
+    Excludes buttons with `role="tab"` so we never match the
+    variant tabs that appear inside the popover after it opens.
+    """
+    log = logging.getLogger("flow_bof")
+    model_re = re.compile(
+        r"(nano\s+banana|veo\s+\d|gemini|imagen|omni\s+flash|wan|seedance)",
+        re.I,
+    )
+    strategies: list[tuple[str, "callable[[], Locator]"]] = [
+        ("button containing a model name (nano-banana / veo / etc.)",
+         lambda: page.locator("button:not([role='tab'])").filter(
+             has_text=model_re,
+         )),
+        ("button:has-text('crop_')  [legacy ligature]",
+         lambda: page.locator("button:not([role='tab'])").filter(
+             has_text="crop_",
+         )),
+    ]
+    for label, build in strategies:
+        try:
+            locator = build().first
+            locator.wait_for(state="visible", timeout=2_000)
+            log.info("Settings trigger resolved via: %s", label)
+            return locator
+        except (PlaywrightTimeoutError, AssertionError):
+            continue
+    log.warning(
+        "Settings trigger: no strategy resolved — returning legacy "
+        "locator so caller's existing TimeoutError handling fires.",
+    )
     return page.locator("button").filter(has_text="crop_").first
 
 

@@ -232,6 +232,105 @@ def dismiss_flow_overlays(
     return seen
 
 
+def close_agent_assistant_panel(
+    page: "Page",
+    *,
+    logger: logging.Logger,
+) -> dict:
+    """Close the right-rail "Untitled session" / agent-assistant
+    panel if it's currently open.
+
+    Visible symptom (matches the user's image 1 in the
+    2026-06-04 regression report):
+      - A right sidebar reading "Hi <name>" / "What would you
+        like to do?" with preset action chips.
+      - The panel pushes the composer layout left.
+
+    DOM anchor: the panel always contains a vertical resizer
+    `<div role="separator" aria-label="Resize agent panel">`.
+    From that resizer we walk up to the panel container and
+    look for a `<button>` whose `<i class="google-symbols">`
+    icon ligature is `close`.
+
+    Idempotent and best-effort: if no resizer is present
+    (panel collapsed) or no matching close button is found,
+    the function is a no-op. Never raises.
+
+    Why the previous `close_agent_prompt_pills` sweep doesn't
+    handle this: that helper clicks the first google-symbols
+    "close" icon it finds anywhere on the page, which can be a
+    toast / tooltip / unrelated dialog. The panel close button
+    requires container-scoped targeting.
+    """
+    log = logger
+    panel_closed = False
+    try:
+        resizer = page.locator(
+            "[role='separator'][aria-label='Resize agent panel']"
+        ).first
+        if not resizer.is_visible(timeout=400):
+            if is_debug():
+                log.info("flow-ui-prep: agent assistant panel not present")
+            return {"agent_panel_closed": False}
+    except Exception as exc:  # noqa: BLE001
+        if is_debug():
+            log.info("flow-ui-prep: panel resizer check failed: %s", exc)
+        return {"agent_panel_closed": False}
+
+    # Walk up to the panel container, then look for the close
+    # button inside it. The container class hash changes across
+    # builds — we anchor on the resizer being a descendant
+    # instead.
+    try:
+        close_btn = resizer.locator(
+            "xpath=ancestor::div[1]/ancestor::div[1]"
+            "//button[.//i[contains(@class,'google-symbols')]"
+            "[normalize-space(.)='close']]"
+        ).first
+        if not close_btn.is_visible(timeout=400):
+            # Walk up further — Flow's panel sometimes nests the
+            # close button outside the immediate ancestor.
+            close_btn = page.locator(
+                "button:has(i.google-symbols:text-is('close'))"
+            ).filter(
+                # Only buttons that are inside the same offset-parent
+                # subtree as the resizer.
+                has=page.locator(
+                    "xpath=./ancestor::*[.//div[@aria-label='Resize agent panel']]"
+                ),
+            ).first
+            if not close_btn.is_visible(timeout=400):
+                log.warning(
+                    "flow-ui-prep: agent panel present but its close "
+                    "button could not be located (Flow may have moved it).",
+                )
+                return {"agent_panel_closed": False}
+        close_btn.click(timeout=1_500)
+        page.wait_for_timeout(250)
+        panel_closed = True
+        log.info("Flow UI prep: closed agent assistant panel")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "flow-ui-prep: agent assistant panel close failed: %s", exc,
+        )
+
+    # Confirm the panel is gone.
+    still_open = False
+    try:
+        still_open = page.locator(
+            "[role='separator'][aria-label='Resize agent panel']"
+        ).first.is_visible(timeout=300)
+    except Exception:  # noqa: BLE001
+        pass
+    if panel_closed and still_open:
+        log.warning(
+            "flow-ui-prep: clicked the close button but the agent "
+            "panel resizer is still visible — close may not have stuck.",
+        )
+
+    return {"agent_panel_closed": panel_closed, "still_open": still_open}
+
+
 def close_agent_prompt_pills(
     page: "Page",
     *,
@@ -690,19 +789,25 @@ def prepare_flow_for_image_generation(
     Step order matters:
       1. Dismiss overlays — get any blocking dialog / menu out of
          the way so subsequent clicks aren't intercepted.
-      2. Close agent prompt suggestion *chips* — small in-composer
+      2. Close the agent ASSISTANT panel — the right-rail
+         "Untitled session / What would you like to do?" sidebar
+         Flow opens on new projects. It pushes the composer
+         layout left and can hide the settings pill / submit
+         arrow entirely, so it must close before step 5.
+      3. Close agent prompt suggestion *chips* — small in-composer
          pills that intercept the prompt input.
-      3. Toggle off *Agent mode* — the composer-toolbar pill that
+      4. Toggle off *Agent mode* — the composer-toolbar pill that
          routes the Generate arrow through Flow's agent flow
          instead of the standard image-generation flow we automate.
-         MUST run before step 4, because the settings popover is
+         MUST run before step 5, because the settings popover is
          hidden / behaves differently in Agent mode.
-      4. Re-apply 9:16 / 1x / Nano Banana Pro.
+      5. Re-apply 9:16 / 1x / Nano Banana Pro.
     """
     if not is_prep_enabled():
         return {"skipped": True, "reason": "FLOW_UI_PREP_ENABLED=false"}
     report: dict = {}
     report["dismiss"] = dismiss_flow_overlays(page, logger=logger)
+    report["agent_panel"] = close_agent_assistant_panel(page, logger=logger)
     report["agent_pills"] = close_agent_prompt_pills(page, logger=logger)
     report["agent_mode"] = toggle_off_agent_mode(page, logger=logger)
     report["settings"] = ensure_image_generation_settings(
@@ -726,6 +831,7 @@ def prepare_flow_for_video_generation(
         return {"skipped": True, "reason": "FLOW_UI_PREP_ENABLED=false"}
     report: dict = {}
     report["dismiss"] = dismiss_flow_overlays(page, logger=logger)
+    report["agent_panel"] = close_agent_assistant_panel(page, logger=logger)
     report["agent_pills"] = close_agent_prompt_pills(page, logger=logger)
     report["agent_mode"] = toggle_off_agent_mode(page, logger=logger)
     report["settings"] = ensure_video_generation_settings(page, logger=logger)
