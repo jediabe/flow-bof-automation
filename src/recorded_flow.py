@@ -118,15 +118,209 @@ def _locate_variants_1x_tab(page: Page) -> Locator:
     return page.get_by_role("tab", name="1x").first
 
 
+_IMAGE_MODE_TAB_PICKER_JS = r"""
+() => {
+  // The settings popover has a top-level "Image" / "Video" mode
+  // selector. Empirically Flow ships this as one of:
+  //   - <button role="tab" aria-selected="..."> with text 'Image'
+  //   - <button role="radio" aria-checked="..."> with text 'Image'
+  //   - Plain <button> with a Material icon ligature ('image')
+  //     prefix + the visible label 'Image'
+  // The recorded selector (role=tab name=/^image$/) misses the
+  // icon-prefix and the radio shapes. This picker walks every open
+  // popover-ish container, looks for any clickable whose innerText
+  // (after stripping a leading 'image' / 'movie' icon ligature)
+  // equals 'Image' or 'Image generation', tags it with a data
+  // attribute, and returns its details for the runner log.
+  const isVisible = el => {
+    const r = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    return r.width > 0 && r.height > 0 &&
+           cs.visibility !== 'hidden' && cs.display !== 'none';
+  };
+  const cleanText = txt => {
+    // Strip a leading Material icon ligature so 'image\nImage' or
+    // 'movie\nVideo' collapses to just the label.
+    return (txt || '')
+      .replace(/^\s*(image|movie|crop_\w+|add\w*|arrow_\w+|swap_\w+)\s*/i, '')
+      .trim();
+  };
+
+  const containers = Array.from(document.querySelectorAll(
+    '[role="dialog"], [data-radix-popper-content-wrapper], ' +
+    '[data-state="open"], [role="tablist"], [role="radiogroup"]'
+  )).filter(isVisible);
+  // Also include the body itself as a last-resort scope — some
+  // builds render the mode toggle inline next to the composer
+  // instead of inside a popover.
+  containers.push(document.body);
+
+  for (const c of containers) {
+    const candidates = Array.from(c.querySelectorAll(
+      '[role="tab"], [role="radio"], button'
+    )).filter(isVisible);
+    for (const el of candidates) {
+      const raw = (el.innerText || el.textContent || '').trim();
+      const lbl = cleanText(raw).toLowerCase();
+      if (lbl !== 'image' && lbl !== 'image generation') continue;
+      // Skip the obvious false positives: the bottom-of-page
+      // "Image" library link, anything that ALSO mentions Video
+      // (e.g. a combined toggle that's not the tab).
+      if (/video/i.test(raw) && raw.length > 40) continue;
+      document.querySelectorAll('[data-flow-bof-image-tab]').forEach(
+        e => e.removeAttribute('data-flow-bof-image-tab')
+      );
+      el.setAttribute('data-flow-bof-image-tab', '1');
+      const r = el.getBoundingClientRect();
+      return {
+        ok: true,
+        text: raw.slice(0, 60),
+        role: el.getAttribute('role'),
+        aria_selected: el.getAttribute('aria-selected'),
+        aria_checked: el.getAttribute('aria-checked'),
+        aria_pressed: el.getAttribute('aria-pressed'),
+        rect: {
+          x: Math.round(r.x), y: Math.round(r.y),
+          w: Math.round(r.width), h: Math.round(r.height),
+        },
+      };
+    }
+  }
+  return {error: 'no Image-mode toggle found in any open container'};
+}
+"""
+
+
 def _locate_image_mode_tab(page: Page) -> Locator:
-    # The settings popover has top-level "Image" / "Video" tabs.
-    # Selecting "Image" is required before the Nano Banana Pro model
-    # option is rendered — see image 5 in the 2026-06-04 regression
-    # report. The popover defaults to whichever mode the composer
-    # was last in; a fresh "New project" often opens on Video.
-    return page.get_by_role(
-        "tab", name=re.compile(r"^\s*image\s*$", re.I),
+    """Multi-strategy lookup for Flow's Image/Video mode toggle in
+    the settings popover.
+
+    The composer remembers its last mode. When the previous run
+    was video, the popover lands on Video and the image-mode
+    controls (Nano Banana Pro picker, + button on the composer)
+    are absent from the DOM. The runner MUST be able to flip the
+    composer back to image mode or every downstream image step
+    fails silently.
+
+    Empirically the toggle ships as either a `role="tab"`, a
+    `role="radio"` (Radix RadioGroup), or a plain `<button>` with
+    a Material icon ligature `image` prefix. Try each shape; on
+    every miss fall through to a JS-driven picker that scans
+    every open popover/tablist for a clickable whose label
+    (after stripping an icon-ligature prefix) reads "Image".
+
+    The JS picker tags the chosen element with
+    `data-flow-bof-image-tab="1"` and the returned locator binds
+    to that attribute, so the click goes to exactly the element
+    the picker chose. Marker is stripped on every call so a stale
+    tag from a previous run can't accidentally bind.
+    """
+    log = logging.getLogger("flow_bof")
+    name_re = re.compile(r"^\s*image\s*$", re.I)
+
+    # Strategy 1 — JS picker (most reliable; handles icon-prefix +
+    # role variants in one pass).
+    try:
+        result = page.evaluate(_IMAGE_MODE_TAB_PICKER_JS)
+        if isinstance(result, dict) and result.get("ok"):
+            log.info(
+                "Image tab JS picker selected: text=%r role=%r aria-selected=%s rect=%s",
+                result.get("text"),
+                result.get("role"),
+                result.get("aria_selected"),
+                result.get("rect"),
+            )
+            return page.locator('[data-flow-bof-image-tab="1"]').first
+        elif isinstance(result, dict) and result.get("error"):
+            log.info(
+                "Image tab JS picker: %s", result.get("error"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.info("Image tab JS picker errored: %s", _short_err(exc))
+
+    # Strategies 2-N — semantic role fallbacks.
+    strategies: list[tuple[str, "callable[[], Locator]"]] = [
+        ("get_by_role(tab, name~Image)",
+         lambda: page.get_by_role("tab", name=name_re)),
+        ("get_by_role(radio, name~Image)",
+         lambda: page.get_by_role("radio", name=name_re)),
+        ("get_by_role(button, name~Image)",
+         lambda: page.get_by_role("button", name=name_re)),
+    ]
+    for label, build in strategies:
+        try:
+            locator = build().first
+            locator.wait_for(state="visible", timeout=1_500)
+            log.info("Image tab resolved via: %s", label)
+            return locator
+        except (PlaywrightTimeoutError, AssertionError):
+            continue
+
+    log.warning(
+        "Image tab: every strategy missed. Returning a never-resolving "
+        "locator so the caller's try/except sees a clean timeout."
+    )
+    return page.locator(
+        '[data-flow-bof-image-tab="never-set"]'
     ).first
+
+
+def _composer_is_in_image_mode(page: Page) -> bool | None:
+    """Cheap visual check: is the composer currently rendering
+    image-mode controls?
+
+    Returns True when the composer's settings-pill text starts with
+    "Image" (or — fallback — a + button is present and the
+    "swap_horiz" video-mode button isn't). False when the pill
+    text starts with "Video" or the swap button is present. None
+    when we can't tell (composer hidden, page not loaded yet).
+
+    Cheap: one page.evaluate, no waits. Designed to be called as
+    a verification step AFTER a mode switch click, so we know
+    whether the click actually flipped the DOM.
+    """
+    try:
+        return page.evaluate(r"""
+() => {
+  const isVisible = el => {
+    const r = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    return r.width > 0 && r.height > 0 &&
+           cs.visibility !== 'hidden' && cs.display !== 'none';
+  };
+  const textbox = document.querySelector(
+    'div[role="textbox"][contenteditable="true"]'
+  );
+  if (!textbox || !isVisible(textbox)) return null;
+  let scope = textbox;
+  for (let i = 0; i < 6 && scope.parentElement; i++) {
+    scope = scope.parentElement;
+  }
+  const buttons = Array.from(scope.querySelectorAll('button'))
+    .filter(isVisible);
+  // Settings-pill check: the pill text starts with "Image" or
+  // "Video". This is the most reliable signal once Flow has
+  // rendered the composer fully.
+  for (const b of buttons) {
+    const t = (b.innerText || b.textContent || '').trim();
+    if (/^Image\b/i.test(t)) return true;
+    if (/^Video\b/i.test(t)) return false;
+  }
+  // Fallback: presence of the swap_horiz button is video-only,
+  // presence of an 'add'-ligature button is image-only.
+  const hasSwap = buttons.some(b =>
+    /swap_horiz|swap first/i.test((b.innerText || b.textContent || ''))
+  );
+  if (hasSwap) return false;
+  const hasAdd = buttons.some(b =>
+    /^add(_\d)?\b/i.test((b.innerText || b.textContent || '').trim())
+  );
+  if (hasAdd) return true;
+  return null;
+}
+""")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _locate_model_nano_banana_pro(page: Page) -> Locator:
@@ -886,28 +1080,63 @@ def _apply_project_settings(
 
     # The popover defaults to whichever mode the composer was last
     # in. A fresh "New project" or a recent video flow can land it on
-    # the Video tab, which hides the Nano Banana Pro model option
-    # entirely (Veo 3.x is shown instead). Click the Image tab first
-    # so the aspect/variant/model loop below sees the image controls.
-    # Best-effort: skip silently if the tab is already selected or
-    # the role isn't found (older builds don't have the Image/Video
-    # split).
-    try:
-        image_tab = _locate_image_mode_tab(page)
-        if image_tab.is_visible(timeout=500):
-            selected = (image_tab.get_attribute("aria-selected") or "").lower()
-            if selected != "true":
+    # the Video tab — and in that state the Nano Banana Pro model is
+    # absent from the DOM AND the composer doesn't render the upload
+    # + button. We MUST flip the composer back to image mode before
+    # proceeding. If we can't, log a clear error and skip the
+    # aspect/variant/model loop instead of pressing on into guaranteed
+    # downstream timeouts.
+    pre_mode = _composer_is_in_image_mode(page)
+    if pre_mode is True:
+        logger.info("Composer already in image mode")
+    else:
+        if pre_mode is False:
+            logger.info(
+                "Composer is in video mode — switching to image mode",
+            )
+        else:
+            logger.info(
+                "Composer mode could not be determined — attempting "
+                "image-mode switch anyway",
+            )
+        switched = False
+        try:
+            image_tab = _locate_image_mode_tab(page)
+            if image_tab.is_visible(timeout=1_000):
                 image_tab.click(timeout=selector_timeout_ms)
-                logger.info("Selected Image tab in settings popover")
-                page.wait_for_timeout(150)
-    except (PlaywrightTimeoutError, AssertionError):
-        # Older Flow build with no Image/Video tab; nothing to do.
-        pass
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Image-tab pre-select skipped (%s); continuing — aspect/"
-            "variant clicks usually work on either tab.", exc,
-        )
+                logger.info("Clicked Image-mode toggle in settings popover")
+                page.wait_for_timeout(350)
+                switched = True
+        except (PlaywrightTimeoutError, AssertionError) as exc:
+            logger.warning(
+                "Image-mode toggle not visible / not clickable: %s", exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Image-mode toggle click raised: %s", exc,
+            )
+
+        # Verify the switch took. If it didn't, abort the rest of
+        # this helper so the caller gets a single clean warning
+        # instead of three separate "could not select X" timeouts.
+        post_mode = _composer_is_in_image_mode(page)
+        if post_mode is True:
+            logger.info("Composer is now in image mode")
+        else:
+            logger.warning(
+                "Composer is NOT in image mode after switch attempt "
+                "(pre=%s, post=%s, switched=%s). Skipping aspect / "
+                "variant / model selection; downstream upload step "
+                "will fail with a clearer error.",
+                pre_mode, post_mode, switched,
+            )
+            # Close the popover so we don't leave it dangling for
+            # the upload step.
+            try:
+                page.keyboard.press("Escape")
+            except Exception:  # noqa: BLE001
+                pass
+            return
 
     for label, locator_fn in (
         ("aspect 9:16", _locate_aspect_9_16_tab),
