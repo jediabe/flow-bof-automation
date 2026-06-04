@@ -94,6 +94,38 @@ def _runner_version() -> str:
         return "unknown"
 
 
+def _platform_asset_ext() -> str | None:
+    """Filename suffix the auto-updater expects for this platform's
+    release asset. None on Linux (no packaged distribution yet)."""
+    if sys.platform == "darwin":
+        return ".dmg"
+    if sys.platform.startswith("win"):
+        return ".exe"
+    return None
+
+
+def _pick_asset_for_platform(assets: list) -> dict | None:
+    """Find the right binary in a GitHub release's `assets[]` list.
+
+    Match strategy is conservative: filename extension only. This
+    means our release process has freedom over the asset filename
+    (e.g. `FlowBOFRunner-mac-alpha.dmg` vs `FlowBOFRunner.dmg`) as
+    long as the extension is right.
+
+    Returns the first matching asset dict (size + browser_download_url
+    + name) or None when no suitable binary is in the release.
+    """
+    ext = _platform_asset_ext()
+    if ext is None:
+        return None
+    ext_lower = ext.lower()
+    for a in assets:
+        name = (a.get("name") or "").lower()
+        if name.endswith(ext_lower):
+            return a
+    return None
+
+
 # ---------------------------------------------------------------------
 # Theme
 # ---------------------------------------------------------------------
@@ -465,6 +497,7 @@ class RunnerGUI:
 
         latest_tag = (payload.get("tag_name") or "").strip()
         release_url = (payload.get("html_url") or GITHUB_RELEASES_PAGE).strip()
+        assets = payload.get("assets") or []
         latest_normalized = latest_tag.lstrip("v").strip()
         if not latest_normalized:
             self._post(
@@ -475,7 +508,7 @@ class RunnerGUI:
 
         self._post(
             self._update_check_finished,
-            current, latest_normalized, release_url,
+            current, latest_normalized, release_url, assets,
         )
 
     def _post(self, fn, *args) -> None:
@@ -494,7 +527,7 @@ class RunnerGUI:
         )
 
     def _update_check_finished(
-        self, current: str, latest: str, release_url: str,
+        self, current: str, latest: str, release_url: str, assets: list,
     ) -> None:
         self.btn_update.state(["!disabled"])
         self._append_log(
@@ -507,28 +540,272 @@ class RunnerGUI:
                 f"published release.",
             )
             return
-        # Version strings differ. Don't try to be clever about which
-        # is "newer" — pre-release / alpha / build-suffix tags break
-        # naive comparisons. Show both, let the user decide.
-        if messagebox.askyesno(
-            "Update check",
+
+        # Version strings differ. Pick the right asset (.dmg on Mac,
+        # .exe on Windows) and offer a one-click download.
+        asset = _pick_asset_for_platform(assets)
+        if asset is None:
+            # No matching binary in the release. Fall back to the
+            # browser flow so the user can still grab whatever the
+            # release does have (e.g. a source-only tag).
+            self._append_log(
+                f"[gui] no .{_platform_asset_ext() or '?'} asset in release "
+                f"v{latest} — falling back to release page\n", tag="warn",
+            )
+            if messagebox.askyesno(
+                "Update available",
+                f"Your runner:    v{current}\n"
+                f"Latest release: v{latest}\n\n"
+                f"No installer for this platform in the release. "
+                f"Open the release page in your browser?",
+                default=messagebox.YES,
+            ):
+                try:
+                    webbrowser.open(release_url)
+                except Exception:  # noqa: BLE001
+                    messagebox.showinfo(
+                        "Open this URL",
+                        f"Copy this URL:\n\n{release_url}",
+                    )
+            return
+
+        size_mb = (asset.get("size") or 0) / 1024 / 1024
+        name = asset.get("name") or "FlowBOFRunner update"
+        download_url = asset.get("browser_download_url") or ""
+        if not download_url:
+            self._update_check_failed("Release asset has no download URL.")
+            return
+
+        # Modal: tell the user what we'd download + offer it.
+        if not messagebox.askyesno(
+            "Update available",
             f"Your runner:    v{current}\n"
             f"Latest release: v{latest}\n\n"
-            f"Open the release page in your browser?\n"
-            f"(Downloads + replaces are manual — your token + config "
-            f"survive the swap.)",
+            f"Download:  {name}\n"
+            f"Size:      {size_mb:.1f} MB\n\n"
+            f"Saves to your Downloads folder and opens automatically "
+            f"when the download finishes. Your token + config survive "
+            f"the upgrade.",
             default=messagebox.YES,
+        ):
+            return
+
+        self._start_update_download(name, download_url, latest, release_url)
+
+    # ----- Download flow ----------------------------------------------
+
+    def _start_update_download(
+        self, name: str, url: str, version: str, release_url: str,
+    ) -> None:
+        """Open the progress dialog and kick off the worker thread."""
+        dest_dir = Path.home() / "Downloads"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            dest_dir = Path.home()
+        dest = dest_dir / name
+
+        # Cancel signal that the worker thread polls between chunks.
+        self._update_cancel = threading.Event()
+
+        # Progress dialog
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Downloading update")
+        dlg.configure(bg=_BG)
+        dlg.geometry("420x180")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: self._update_cancel.set())
+
+        ttk.Label(
+            dlg, text=f"Downloading {name}",
+            style="Header.TLabel", padding=(16, 14, 16, 4),
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            dlg, text=f"→ {dest}",
+            style="Dim.TLabel", padding=(16, 0, 16, 8),
+        ).pack(anchor=tk.W)
+
+        progress = ttk.Progressbar(
+            dlg, mode="determinate", length=380, maximum=100,
+        )
+        progress.pack(padx=16, pady=4)
+        self._update_progress_bar = progress
+
+        status = ttk.Label(
+            dlg, text="0.0 / ? MB",
+            style="Dim.TLabel", padding=(16, 4, 16, 0),
+        )
+        status.pack(anchor=tk.W)
+        self._update_progress_status = status
+
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=10)
+        ttk.Button(
+            btn_row, text="Cancel",
+            command=lambda: self._update_cancel.set(),
+        ).pack(side=tk.RIGHT)
+
+        self._update_progress_dialog = dlg
+        self._append_log(f"[gui] downloading {name}...\n")
+
+        threading.Thread(
+            target=self._update_download_worker,
+            args=(url, dest, version, release_url),
+            name="update-download",
+            daemon=True,
+        ).start()
+
+    def _update_download_worker(
+        self, url: str, dest: Path, version: str, release_url: str,
+    ) -> None:
+        """HTTP-stream the asset to disk, reporting progress.
+
+        Posts progress events back to the Tk thread via queue +
+        `<<UpdateProgress>>`. Cancel-aware: checks the
+        `self._update_cancel` Event between chunks, deletes the
+        partial file on cancel.
+        """
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": f"FlowBOFRunner/{_runner_version()}"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(dest, "wb") as fh:
+                    while True:
+                        if self._update_cancel.is_set():
+                            fh.close()
+                            try:
+                                dest.unlink()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            self._post(self._update_download_cancelled)
+                            return
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        done += len(chunk)
+                        self._post(self._update_download_progress, done, total)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+            self._post(self._update_download_failed, f"{type(exc).__name__}: {exc}")
+            return
+
+        self._post(self._update_download_done, dest, version, release_url)
+
+    def _update_download_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            pct = min(100, (done * 100) // total)
+            self._update_progress_bar.configure(value=pct)
+            self._update_progress_status.configure(
+                text=f"{done / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB ({pct}%)",
+            )
+        else:
+            # Indeterminate — no Content-Length header. Spin the bar.
+            self._update_progress_bar.configure(mode="indeterminate")
+            self._update_progress_bar.start(50)
+            self._update_progress_status.configure(
+                text=f"{done / 1024 / 1024:.1f} MB downloaded",
+            )
+
+    def _update_download_cancelled(self) -> None:
+        self._close_progress_dialog()
+        self._append_log("[gui] download cancelled\n", tag="warn")
+
+    def _update_download_failed(self, reason: str) -> None:
+        self._close_progress_dialog()
+        self._append_log(f"[gui] download failed: {reason}\n", tag="error")
+        messagebox.showerror(
+            "Download failed",
+            f"Could not download the update.\n\n{reason}\n\n"
+            f"You can grab it manually from the release page.",
+        )
+
+    def _update_download_done(
+        self, dest: Path, version: str, release_url: str,
+    ) -> None:
+        self._close_progress_dialog()
+        size_mb = dest.stat().st_size / 1024 / 1024
+        self._append_log(
+            f"[gui] downloaded {dest.name} ({size_mb:.1f} MB) → {dest}\n",
+            tag="ok",
+        )
+        # Auto-open according to platform.
+        try:
+            if sys.platform == "darwin":
+                # `open` on a .dmg mounts it + opens the Finder window
+                # showing the .app — user drags to Applications.
+                subprocess.run(["open", str(dest)], check=False)
+                finish_msg = (
+                    f"Downloaded v{version} to:\n  {dest}\n\n"
+                    f"Finder is mounting the disk image now. Drag "
+                    f"FlowBOFRunner.app into Applications (replacing "
+                    f"the old one), then relaunch from Applications."
+                )
+            elif sys.platform.startswith("win"):
+                # Reveal the new .exe in Explorer so the user can
+                # move it over the running one. The running .exe is
+                # file-locked; we can't replace it from inside.
+                try:
+                    subprocess.run(
+                        ["explorer", "/select,", str(dest)], check=False,
+                    )
+                except Exception:  # noqa: BLE001
+                    os.startfile(str(dest.parent))  # type: ignore[attr-defined]
+                finish_msg = (
+                    f"Downloaded v{version} to:\n  {dest}\n\n"
+                    f"Explorer is showing the new file. Close this app, "
+                    f"then move the new FlowBOFRunner.exe over your "
+                    f"existing one and double-click to launch."
+                )
+            else:
+                finish_msg = (
+                    f"Downloaded v{version} to:\n  {dest}\n\n"
+                    f"Replace your existing runner with this file and "
+                    f"relaunch."
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(
+                f"[gui] auto-open failed: {exc} (file is at {dest})\n",
+                tag="warn",
+            )
+            finish_msg = (
+                f"Downloaded to:\n  {dest}\n\n"
+                f"(Auto-open failed — find the file manually.)"
+            )
+
+        messagebox.showinfo("Update downloaded", finish_msg)
+        # Offer release notes as a follow-up — useful when the user
+        # wants to see what changed before installing.
+        if messagebox.askyesno(
+            "Release notes",
+            "Open the release notes for this version in your browser?",
+            default=messagebox.NO,
         ):
             try:
                 webbrowser.open(release_url)
-            except Exception as exc:  # noqa: BLE001
-                self._append_log(
-                    f"[gui] could not open browser: {exc}\n", tag="warn",
-                )
-                messagebox.showinfo(
-                    "Open this URL",
-                    f"Your browser didn't open. Copy this URL:\n\n{release_url}",
-                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _close_progress_dialog(self) -> None:
+        try:
+            if hasattr(self, "_update_progress_bar"):
+                self._update_progress_bar.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if hasattr(self, "_update_progress_dialog") and self._update_progress_dialog:
+                self._update_progress_dialog.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_setup(self) -> None:
         # Setup needs stdin. Tk can't easily give a subprocess an
