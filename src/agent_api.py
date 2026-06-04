@@ -1122,6 +1122,27 @@ def _sanitize_item_id_for_filename(item_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", item_id)[:120] or "item"
 
 
+def _redact_url_for_log(url: str) -> str:
+    """Drop the query string from a URL before logging.
+
+    Reference image URLs may carry signed-CDN params (Cloudflare R2,
+    S3 presigned, etc.). Those grant download access for hours/days,
+    so they must never reach our log files or remote log aggregators.
+    Preserve scheme/host/path so the log is still actionable; replace
+    the query with a sentinel so the reader knows one existed.
+    """
+    if not url:
+        return "<empty-url>"
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "<invalid-url>"
+        redacted_query = "?<redacted>" if parsed.query else ""
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}{redacted_query}"
+    except Exception:  # noqa: BLE001
+        return "<invalid-url>"
+
+
 def _download_reference_image(
     *,
     url: str,
@@ -1173,7 +1194,7 @@ def _download_reference_image(
     dest.write_bytes(body)
     logger.info(
         "cached reference image: %s -> %s (%d bytes, content-type=%s)",
-        url, dest, len(body), content_type or "?",
+        _redact_url_for_log(url), dest, len(body), content_type or "?",
     )
     return dest
 
@@ -1404,7 +1425,7 @@ def _handle_generate_flow_images(
                         "code":    "REFERENCE_IMAGE_DOWNLOAD_FAILED",
                         "message": (
                             f"{type(exc).__name__}: {exc} "
-                            f"(url={ref_url_raw})"
+                            f"(url={_redact_url_for_log(ref_url_raw)})"
                         ),
                     },
                 })
