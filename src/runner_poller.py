@@ -295,9 +295,19 @@ class RunnerPoller:
     def _sleep(self, seconds: float) -> None:
         # Chunked sleep so Ctrl-C lands within a second even if the
         # poll interval is long.
+        # Wake-up cap controls how quickly Ctrl-C / SIGTERM exits
+        # this sleep. 500ms felt snappy on Linux/Docker but on macOS
+        # those frequent wake-ups read as ~1-3% CPU in Activity
+        # Monitor even though the process is idle (each wake is a
+        # kernel context switch + time.monotonic() call — adds up to
+        # 7,200 wake-ups/hour at 500ms). Bumping to 2s drops idle
+        # wake-ups 4× while keeping Ctrl-C response within ~2s,
+        # which is fine for a background runner. The GUI wrapper's
+        # Stop button hits the same SIGTERM path so it shares the
+        # ~2s shutdown budget.
         end = time.monotonic() + seconds
         while not _should_stop and time.monotonic() < end:
-            time.sleep(min(0.5, end - time.monotonic()))
+            time.sleep(min(2.0, end - time.monotonic()))
 
 
 def run() -> int:
