@@ -52,6 +52,20 @@ hidden_imports = (
         # to gather whatever the installed version actually ships.)
         "playwright",
         "playwright.sync_api",
+        # GUI module is at the top level (not under src.) and is
+        # imported lazily inside `if args.gui:` / the interactive
+        # menu — PyInstaller's static analysis misses lazy conditional
+        # imports, so name it here so the GUI launches from the
+        # packaged exe.
+        "runner_gui",
+        # Tkinter is stdlib but its native helpers (_tkinter,
+        # tcl/tk runtime files) need explicit listing to bundle on
+        # macOS — PyInstaller's tk hook handles the rest once the
+        # top-level tkinter is in the import graph.
+        "tkinter",
+        "tkinter.ttk",
+        "tkinter.font",
+        "tkinter.messagebox",
     ]
 )
 

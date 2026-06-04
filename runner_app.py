@@ -110,6 +110,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--gui",
+        action="store_true",
+        help=(
+            "Launch the lightweight Tk status-window GUI instead of "
+            "the console menu. The GUI subprocess-launches this same "
+            "exe with --run, so all functionality stays identical — "
+            "just with buttons and a tailing log panel."
+        ),
+    )
+    p.add_argument(
         "--saas-url",
         default=None,
         help="Override the saved SaaS URL for this run + save.",
@@ -263,7 +273,8 @@ def interactive(cfg: RunnerConfig) -> int:
     print_summary(cfg)
 
     choice = ui_console.menu([
-        ("run",     "Start runner"),
+        ("gui",     "Launch GUI window (status + controls)"),
+        ("run",     "Start runner (console only)"),
         ("open",    "Open/Reopen Google Flow browser"),
         ("diag",    "Run diagnostics"),
         ("inspect", "Inspect Flow UI (DOM dump for bug reports)"),
@@ -271,6 +282,13 @@ def interactive(cfg: RunnerConfig) -> int:
         ("reset",   "Reset config (deletes saved settings)"),
         ("exit",    "Exit"),
     ])
+    if choice == "gui":
+        try:
+            import runner_gui
+        except Exception as exc:  # noqa: BLE001
+            print(f"[FAIL] Could not load GUI module: {exc}")
+            return 6
+        return runner_gui.main()
     if choice == "run":
         return do_run(cfg)
     if choice == "open":
@@ -315,6 +333,15 @@ def main(argv: list[str] | None = None) -> int:
             cfg = load_config()
             cfg = _apply_overrides(cfg, args)
             return do_inspect_flow(cfg)
+        if args.gui:
+            # Late import so the console paths (--run / --diagnose /
+            # --setup / etc.) never pay the Tk import cost.
+            try:
+                import runner_gui
+            except Exception as exc:  # noqa: BLE001
+                print(f"[FAIL] Could not load GUI module: {exc}")
+                return 6
+            return runner_gui.main()
 
         cfg = load_config()
         cfg = _apply_overrides(cfg, args)
