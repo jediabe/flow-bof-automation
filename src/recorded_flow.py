@@ -323,6 +323,186 @@ def _composer_is_in_image_mode(page: Page) -> bool | None:
         return None
 
 
+def _pin_image_model(
+    page: Page,
+    *,
+    logger: logging.Logger,
+    target_name: str = "Nano Banana Pro",
+    selector_timeout_ms: int = 15_000,
+) -> bool:
+    """Ensure the image-model dropdown is set to `target_name`.
+
+    Why this exists: the recorded selector clicked a `<span>` whose
+    text was the target model name, which only works when that
+    model is ALREADY selected (its name shows in the dropdown
+    trigger). When the user has manually switched to a different
+    image model (Nano Banana 2, Imagen, etc.), the target option
+    isn't in the DOM until the dropdown is opened first.
+
+    Mirrors `ensure_veo_lite_model` from flow_ui_prep: find
+    trigger → read current → if mismatched, click open → click
+    target → verify. Best-effort throughout — every failure logs
+    a warning and returns False; the caller continues with
+    whatever model is currently selected.
+
+    Returns True iff the target model is the active selection
+    after this call (either because it already was, or because
+    we successfully switched).
+    """
+    name_re = re.compile(
+        r"\b" + re.escape(target_name) + r"\b", re.I,
+    )
+    known_image_models_re = re.compile(
+        r"(nano\s+banana|imagen|gemini)", re.I,
+    )
+
+    # ---- 1. Find the model trigger inside the open popover ----
+    trigger: Locator | None = None
+    trigger_strategies = [
+        ("popover-scoped button with image-model name",
+         lambda: page.locator(
+             "[role='dialog'], [data-radix-popper-content-wrapper], "
+             "[data-state='open']"
+         ).locator("button").filter(
+             has_text=known_image_models_re,
+         ).first),
+        ("get_by_role(combobox) with image-model name",
+         lambda: page.get_by_role("combobox").filter(
+             has_text=known_image_models_re,
+         ).first),
+        ("any button with image-model name (page-wide)",
+         lambda: page.locator("button").filter(
+             has_text=known_image_models_re,
+         ).first),
+    ]
+    for label, build in trigger_strategies:
+        try:
+            cand = build()
+            if cand.is_visible(timeout=500):
+                trigger = cand
+                logger.info("Image model trigger via: %s", label)
+                break
+        except (PlaywrightTimeoutError, AssertionError):
+            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "  trigger strategy %r errored: %s",
+                label, _short_err(exc),
+            )
+
+    if trigger is None:
+        logger.warning(
+            "Image model trigger not found in settings popover; "
+            "leaving model unchanged (was probably %r-class).",
+            target_name,
+        )
+        return False
+
+    # ---- 2. Read current selection ----
+    current = ""
+    try:
+        current = (trigger.inner_text(timeout=500) or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    if name_re.search(current):
+        logger.info(
+            "Image model already %r — no change",
+            current.replace("\n", " ⏎ ")[:60],
+        )
+        return True
+
+    # ---- 3. Open the dropdown ----
+    try:
+        trigger.click(timeout=selector_timeout_ms)
+        page.wait_for_timeout(300)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not open image model dropdown (current=%r): %s",
+            current.replace("\n", " ⏎ ")[:60], _short_err(exc),
+        )
+        return False
+
+    # ---- 4. Find the target option inside the open dropdown ----
+    option: Locator | None = None
+    option_strategies = [
+        ("get_by_role(option, name~target)",
+         lambda: page.get_by_role("option", name=name_re).first),
+        ("get_by_role(menuitem, name~target)",
+         lambda: page.get_by_role("menuitem", name=name_re).first),
+        ("get_by_role(menuitemradio, name~target)",
+         lambda: page.get_by_role("menuitemradio", name=name_re).first),
+        ("listbox/menu-scoped text match",
+         lambda: page.locator(
+             "[role='listbox'], [role='menu'], "
+             "[data-radix-popper-content-wrapper]"
+         ).locator(
+             f":text-matches('{re.escape(target_name)}', 'i')"
+         ).first),
+        ("any visible :text-matches target",
+         lambda: page.locator(
+             f":text-matches('{re.escape(target_name)}', 'i')"
+         ).first),
+    ]
+    for label, build in option_strategies:
+        try:
+            cand = build()
+            if cand.is_visible(timeout=1_500):
+                option = cand
+                logger.info("Image model option via: %s", label)
+                break
+        except (PlaywrightTimeoutError, AssertionError):
+            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "  option strategy %r errored: %s",
+                label, _short_err(exc),
+            )
+
+    if option is None:
+        logger.warning(
+            "%r option not visible in image model dropdown after "
+            "opening; current model %r stays.",
+            target_name, current.replace("\n", " ⏎ ")[:60],
+        )
+        try:
+            page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    # ---- 5. Click + verify ----
+    try:
+        option.click(timeout=selector_timeout_ms)
+        page.wait_for_timeout(300)
+        logger.info(
+            "Switched image model: %r → %s",
+            current.replace("\n", " ⏎ ")[:60] or "(unknown)",
+            target_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Clicking %r option failed: %s",
+            target_name, _short_err(exc),
+        )
+        return False
+
+    # Verify by re-reading the trigger text. If the dropdown
+    # closed and the trigger now shows the target, we're good.
+    try:
+        new_text = (trigger.inner_text(timeout=500) or "").strip()
+        if name_re.search(new_text):
+            return True
+        logger.warning(
+            "Image model click registered but trigger text is %r "
+            "— click may not have taken.",
+            new_text.replace("\n", " ⏎ ")[:60],
+        )
+    except Exception:  # noqa: BLE001
+        # If we can't re-read the trigger, assume the click took.
+        pass
+    return True
+
+
 def _locate_model_nano_banana_pro(page: Page) -> Locator:
     """Multi-strategy lookup for the Nano Banana Pro model option.
 
@@ -1138,16 +1318,30 @@ def _apply_project_settings(
                 pass
             return
 
+    # Aspect + variants are simple role="tab" clicks — they're always
+    # in the DOM regardless of selection state.
     for label, locator_fn in (
         ("aspect 9:16", _locate_aspect_9_16_tab),
         ("1x variants", _locate_variants_1x_tab),
-        ("Nano Banana Pro model", _locate_model_nano_banana_pro),
     ):
         try:
             locator_fn(page).click(timeout=selector_timeout_ms)
             logger.info("Selected %s", label)
         except (PlaywrightTimeoutError, AssertionError) as exc:
             logger.warning("Could not select %s (%s); continuing.", label, exc)
+
+    # Model is a dropdown, not a tab. If the user has manually
+    # picked a different image model (Nano Banana 2, Imagen, etc.)
+    # the Nano Banana Pro option only appears in the DOM after the
+    # dropdown opens — a direct click on a "Nano Banana Pro" span
+    # times out because nothing matches. _pin_image_model handles
+    # the open→pick→verify dance.
+    _pin_image_model(
+        page,
+        logger=logger,
+        target_name="Nano Banana Pro",
+        selector_timeout_ms=selector_timeout_ms,
+    )
 
     try:
         page.keyboard.press("Escape")
