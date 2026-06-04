@@ -899,17 +899,168 @@ class RunnerGUI:
             pass
 
     def _on_setup(self) -> None:
-        # Setup needs stdin. Tk can't easily give a subprocess an
-        # attached terminal, so for v1 we tell the user to use the
-        # console exe for setup. Later we can render a proper Tk
-        # dialog that writes runner_config.json directly.
-        messagebox.showinfo(
-            "Setup",
-            "For this build, run the setup from a terminal:\n\n"
-            f"  {Path(sys.executable).name} --setup\n\n"
-            "A Tk setup dialog is on the roadmap — for now this opens "
-            "the same prompts you saw on first launch.",
+        """Open a modal Tk dialog to edit SaaS URL + runner token.
+        Persists via the same save_config() the console runner uses,
+        so config changes made here are visible to a subprocess
+        runner the next time it loads."""
+        # Late import — keeps the runner_app dependency out of the
+        # GUI's startup path.
+        try:
+            from src.runner_app.config import (
+                DEFAULT_SAAS_URL,
+                load_config,
+                save_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "Setup",
+                f"Could not load config module: {exc}\n\n"
+                "As a fallback you can still run:\n"
+                f"  {Path(sys.executable).name} --setup\n"
+                "from a terminal.",
+            )
+            return
+
+        cfg = load_config()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Runner Setup")
+        dlg.configure(bg=_BG)
+        dlg.geometry("520x340")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        wrap = ttk.Frame(dlg, style="TFrame", padding=(20, 16, 20, 12))
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            wrap,
+            text="Runner Setup",
+            style="Header.TLabel",
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            wrap,
+            text=(
+                "Configure where this runner reports to and which "
+                "token it uses. Saved to the runner's config file; "
+                "Chrome profile + ports keep their current values."
+            ),
+            style="Dim.TLabel",
+            wraplength=460,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 12))
+
+        # --- SaaS URL row ---
+        ttk.Label(wrap, text="SaaS URL", style="TLabel").pack(anchor=tk.W)
+        saas_var = tk.StringVar(value=cfg.saas_base_url or DEFAULT_SAAS_URL)
+        saas_entry = ttk.Entry(wrap, textvariable=saas_var, width=58)
+        saas_entry.pack(anchor=tk.W, pady=(2, 2), fill=tk.X)
+        ttk.Label(
+            wrap,
+            text=f"Default: {DEFAULT_SAAS_URL}",
+            style="Dim.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        # --- Token row ---
+        token_label = "Runner token"
+        if cfg.runner_token:
+            token_label = f"Runner token   (current: {cfg.token_masked()})"
+        ttk.Label(wrap, text=token_label, style="TLabel").pack(anchor=tk.W)
+        token_var = tk.StringVar(value="")
+        token_entry = ttk.Entry(
+            wrap, textvariable=token_var, width=58, show="•",
         )
+        token_entry.pack(anchor=tk.W, pady=(2, 2), fill=tk.X)
+
+        show_var = tk.BooleanVar(value=False)
+        def _toggle_show() -> None:
+            token_entry.configure(show="" if show_var.get() else "•")
+        show_chk = ttk.Checkbutton(
+            wrap, text="Show token", variable=show_var, command=_toggle_show,
+        )
+        show_chk.pack(anchor=tk.W)
+
+        ttk.Label(
+            wrap,
+            text=(
+                "Paste a new token to replace the saved one, or leave "
+                "blank to keep the current value."
+                if cfg.runner_token
+                else "Generate one in the SaaS Runner Setup page (step 2)."
+            ),
+            style="Dim.TLabel",
+            wraplength=460,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        # --- Action row ---
+        action = ttk.Frame(wrap, style="TFrame")
+        action.pack(fill=tk.X, pady=(4, 0))
+
+        def _open_agents() -> None:
+            url = (saas_var.get() or DEFAULT_SAAS_URL).rstrip("/") + "/agents"
+            try:
+                webbrowser.open(url)
+            except Exception:  # noqa: BLE001
+                pass
+
+        ttk.Button(
+            action, text="Open SaaS /agents page", command=_open_agents,
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(
+            action, text="Cancel", command=dlg.destroy,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        def _save() -> None:
+            new_url = (saas_var.get() or "").strip()
+            new_token = (token_var.get() or "").strip()
+            if not new_url:
+                messagebox.showerror(
+                    "Setup", "SaaS URL is required.", parent=dlg,
+                )
+                return
+            # Empty token field = keep the existing one. Required when
+            # there's NO existing one.
+            if not new_token and not cfg.runner_token:
+                messagebox.showerror(
+                    "Setup",
+                    "Runner token is required for first-time setup.",
+                    parent=dlg,
+                )
+                return
+            from dataclasses import replace
+            new_cfg = replace(
+                cfg,
+                saas_base_url=new_url,
+                runner_token=new_token or cfg.runner_token,
+            )
+            try:
+                path = save_config(new_cfg)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror(
+                    "Setup", f"Could not save config: {exc}", parent=dlg,
+                )
+                return
+            self._append_log(
+                f"[gui] config saved to {path}\n", tag="ok",
+            )
+            dlg.destroy()
+            messagebox.showinfo(
+                "Setup",
+                "Config saved. Start runner to use the new values.",
+            )
+
+        ttk.Button(
+            action, text="Save", style="Accent.TButton", command=_save,
+        ).pack(side=tk.RIGHT)
+
+        # Focus the field most likely to need editing.
+        if cfg.runner_token:
+            saas_entry.focus_set()
+        else:
+            token_entry.focus_set()
 
     def _run_oneshot(self, extra_args: list[str], label: str) -> None:
         """Run the runner CLI in --foo mode, capture output, dump
