@@ -506,19 +506,9 @@ class RunnerGUI:
         ).start()
 
     def _update_check_worker(self) -> None:
-        # Verbose stderr prints so a hang shows exactly which line it
-        # got stuck on when running from source `python runner_gui.py`.
-        # No effect when running from the packaged .app (stderr goes
-        # nowhere there). Will trim once we know the failure mode.
-        def _dbg(msg: str) -> None:
-            print(f"[update-worker] {msg}", file=sys.stderr, flush=True)
-
-        _dbg("thread started")
         try:
             current = _runner_version().lstrip("v").strip()
-            _dbg(f"current version = {current!r}")
         except Exception as exc:  # noqa: BLE001
-            _dbg(f"version lookup raised: {exc!r}")
             self._post(
                 self._update_check_failed,
                 f"Could not read local version: {exc}",
@@ -526,7 +516,6 @@ class RunnerGUI:
             return
 
         try:
-            _dbg(f"building request to {GITHUB_RELEASES_API}")
             req = urllib.request.Request(
                 GITHUB_RELEASES_API,
                 headers={
@@ -534,23 +523,16 @@ class RunnerGUI:
                     "User-Agent": f"FlowBOFRunner/{current}",
                 },
             )
-            _dbg("calling urlopen (timeout=10)")
             with urllib.request.urlopen(req, timeout=10) as resp:
-                _dbg(f"got response status={resp.status}")
                 body = resp.read()
-                _dbg(f"read {len(body)} bytes")
             payload = json.loads(body.decode("utf-8", "replace"))
-            _dbg(f"parsed JSON, tag={payload.get('tag_name')!r}")
         except urllib.error.HTTPError as exc:
-            _dbg(f"HTTPError {exc.code}")
             self._post(self._update_check_failed, f"GitHub returned HTTP {exc.code}")
             return
         except urllib.error.URLError as exc:
-            _dbg(f"URLError {exc.reason!r}")
             self._post(self._update_check_failed, f"Network error: {exc.reason}")
             return
         except Exception as exc:  # noqa: BLE001
-            _dbg(f"exception {type(exc).__name__}: {exc}")
             self._post(self._update_check_failed, f"{type(exc).__name__}: {exc}")
             return
 
@@ -559,23 +541,16 @@ class RunnerGUI:
         assets = payload.get("assets") or []
         latest_normalized = latest_tag.lstrip("v").strip()
         if not latest_normalized:
-            _dbg("empty tag_name")
             self._post(
                 self._update_check_failed,
                 "Latest release has no tag_name field.",
             )
             return
 
-        _dbg(
-            f"calling _post(_update_check_finished, {current!r}, "
-            f"{latest_normalized!r}, {release_url!r}, "
-            f"{len(assets)} assets)"
-        )
         self._post(
             self._update_check_finished,
             current, latest_normalized, release_url, assets,
         )
-        _dbg("_post returned (worker exiting)")
 
     def _post(self, fn, *args) -> None:
         """Schedule `fn(*args)` to run on the Tk main thread.
@@ -615,22 +590,11 @@ class RunnerGUI:
         Exceptions are logged + traced so a single bad callback
         doesn't take down later ones."""
         import traceback
-        source = "event" if _event is not None else "poll"
-        drained_any = False
         while True:
             try:
                 fn, args = self.update_queue.get_nowait()
             except queue.Empty:
                 break
-            if not drained_any:
-                # Print only when there's actually work — keeps the
-                # 200ms tick silent in the happy idle case.
-                print(
-                    f"[update-drainer] firing via {source}, "
-                    f"first callback: {getattr(fn, '__name__', fn)}",
-                    file=sys.stderr, flush=True,
-                )
-                drained_any = True
             try:
                 fn(*args)
             except Exception as exc:  # noqa: BLE001
@@ -639,8 +603,9 @@ class RunnerGUI:
                     f"{type(exc).__name__}: {exc}\n",
                     tag="error",
                 )
-                # Also print full traceback to stderr so it shows in
-                # the launching Terminal during dev (`python runner_gui.py`).
+                # Also print full traceback to stderr so dev-mode
+                # runs (`python runner_gui.py`) surface the failure
+                # in the launching Terminal.
                 traceback.print_exc()
 
     def _update_check_failed(self, reason: str) -> None:
