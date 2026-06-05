@@ -1187,8 +1187,14 @@ def _download_reference_image(
     item_id: str,
     logger: logging.Logger,
     timeout_seconds: float = 30.0,
+    role: str = "primary",
 ) -> Path:
     """Download `url` into `cache_dir` and return the cached file path.
+
+    The cached filename embeds the role so a Phase-3 multi-ref item
+    can have three distinct cache files (primary / ref2 / ref3)
+    without collision. Old single-image callers pass role="primary"
+    (the default) and behave exactly as before.
 
     Uses httpx when present (already a dep via the AI providers);
     falls back to urllib for stripped installs. Raises any exception
@@ -1196,6 +1202,7 @@ def _download_reference_image(
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     safe_id = _sanitize_item_id_for_filename(item_id)
+    safe_role = re.sub(r"[^A-Za-z0-9]", "_", role)[:16] or "primary"
 
     body: bytes
     content_type: str | None = None
@@ -1227,11 +1234,11 @@ def _download_reference_image(
     ext = _infer_reference_image_ext(
         content_type=content_type, url=url, body_head=body[:32],
     )
-    dest = cache_dir / f"{safe_id}.{ext}"
+    dest = cache_dir / f"{safe_id}_{safe_role}.{ext}"
     dest.write_bytes(body)
     logger.info(
-        "cached reference image: %s -> %s (%d bytes, content-type=%s)",
-        _redact_url_for_log(url), dest, len(body), content_type or "?",
+        "cached reference image (%s): %s -> %s (%d bytes, content-type=%s)",
+        safe_role, _redact_url_for_log(url), dest, len(body), content_type or "?",
     )
     return dest
 
@@ -1399,6 +1406,16 @@ def _handle_generate_flow_images(
         ref_url_raw = (str(raw_item.get("reference_image_url") or "")).strip()
         prompt = str(raw_item.get("image_prompt") or "")
 
+        # Phase 3 — multi-reference image list. When present and
+        # non-empty, this is the authoritative source: the legacy
+        # singular fields above are mirrors of the primary entry,
+        # kept for back-compat with older runners (i.e. us, if a
+        # workspace pins to a runner that predates this code path).
+        # Format: [{role: "primary"|"ref2"|"ref3", url: str?, path: str?}, ...]
+        reference_images_raw = raw_item.get("reference_images") or []
+        if not isinstance(reference_images_raw, list):
+            reference_images_raw = []
+
         if not prompt.strip():
             pre_failed += 1
             items_out.append({
@@ -1414,64 +1431,107 @@ def _handle_generate_flow_images(
             })
             continue
 
-        resolved_path: Path | None = None
-        reference_source: str | None = None
-        downloaded_reference_path: str | None = None
+        # ---- Resolve reference images to local paths -----------------
+        #
+        # Two paths:
+        #   A. Multi-ref (Phase 3): reference_images array is non-empty.
+        #      Resolve each entry to a local path; preserve order.
+        #   B. Legacy single-ref: only reference_image_path /
+        #      reference_image_url were sent. One image, role="primary".
+        #
+        # Both paths produce the same shape: a list of (role, local_path)
+        # tuples in attach order, plus a `reference_source` summary
+        # string for the report.
+        resolved_refs: list[tuple[str, Path]] = []
+        ref_source_summary: str | None = None
+        download_error: str | None = None
 
-        if ref_path_raw:
-            candidate = Path(ref_path_raw)
-            if not candidate.is_absolute():
-                candidate = settings.repo_root / candidate
-            if candidate.exists() and candidate.is_file():
-                resolved_path = candidate
-                reference_source = "path"
-            elif not ref_url_raw:
-                pre_failed += 1
-                items_out.append({
-                    "item_id":      item_id,
-                    "product_name": product_name,
-                    "status":       "failed",
-                    "media_id":     None,
-                    "reference_source": None,
-                    "error": {
-                        "code":    "REFERENCE_IMAGE_NOT_FOUND",
-                        "message": f"File does not exist: {candidate}",
-                    },
-                })
-                continue
-
-        # URL fallback. Either no path was supplied, or the path
-        # didn't exist on disk but a URL was provided alongside it.
-        if resolved_path is None and ref_url_raw:
-            try:
+        def _resolve_one(
+            *, role: str, path_raw: str, url_raw: str,
+        ) -> tuple[Path, str] | None:
+            """Resolve one reference (path → URL fallback). Returns
+            (local_path, source) or None when neither path nor URL was
+            provided. Raises on download failure.
+            """
+            if path_raw:
+                candidate = Path(path_raw)
+                if not candidate.is_absolute():
+                    candidate = settings.repo_root / candidate
+                if candidate.exists() and candidate.is_file():
+                    return candidate, "path"
+            if url_raw:
                 downloaded = _download_reference_image(
-                    url=ref_url_raw,
+                    url=url_raw,
                     cache_dir=cache_dir,
                     item_id=item_id,
                     logger=logger,
+                    role=role,
+                )
+                return downloaded, "url"
+            return None
+
+        if reference_images_raw:
+            # Path A — multi-ref. Iterate the array, resolve each.
+            for ref_entry in reference_images_raw:
+                if not isinstance(ref_entry, dict):
+                    continue
+                role = (str(ref_entry.get("role") or "")).strip() or "primary"
+                entry_url = (str(ref_entry.get("url") or "")).strip()
+                entry_path = (str(ref_entry.get("path") or "")).strip()
+                try:
+                    resolved = _resolve_one(
+                        role=role, path_raw=entry_path, url_raw=entry_url,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    download_error = (
+                        f"[{role}] {type(exc).__name__}: {exc} "
+                        f"(url={_redact_url_for_log(entry_url)})"
+                    )
+                    break
+                if resolved is not None:
+                    resolved_refs.append((role, resolved[0]))
+                    # The summary string reports the source of the
+                    # primary; supplementary refs are assumed to share
+                    # the same transport.
+                    if role == "primary" and ref_source_summary is None:
+                        ref_source_summary = resolved[1]
+        else:
+            # Path B — legacy single-ref. Same resolver, called once.
+            try:
+                resolved = _resolve_one(
+                    role="primary",
+                    path_raw=ref_path_raw,
+                    url_raw=ref_url_raw,
                 )
             except Exception as exc:  # noqa: BLE001
-                pre_failed += 1
-                items_out.append({
-                    "item_id":      item_id,
-                    "product_name": product_name,
-                    "status":       "failed",
-                    "media_id":     None,
-                    "reference_source": "url",
-                    "error": {
-                        "code":    "REFERENCE_IMAGE_DOWNLOAD_FAILED",
-                        "message": (
-                            f"{type(exc).__name__}: {exc} "
-                            f"(url={_redact_url_for_log(ref_url_raw)})"
-                        ),
-                    },
-                })
-                continue
-            resolved_path = downloaded
-            reference_source = "url"
-            downloaded_reference_path = str(downloaded)
+                download_error = (
+                    f"{type(exc).__name__}: {exc} "
+                    f"(url={_redact_url_for_log(ref_url_raw)})"
+                )
+                resolved = None
+            if resolved is not None:
+                resolved_refs.append(("primary", resolved[0]))
+                ref_source_summary = resolved[1]
 
-        if resolved_path is None:
+        # Failures at the resolution stage. Two distinct error codes
+        # so the SaaS can tell a download failure (transient — try
+        # again) from a missing-config error (user needs to attach
+        # an image).
+        if download_error:
+            pre_failed += 1
+            items_out.append({
+                "item_id":      item_id,
+                "product_name": product_name,
+                "status":       "failed",
+                "media_id":     None,
+                "reference_source": "url",
+                "error": {
+                    "code":    "REFERENCE_IMAGE_DOWNLOAD_FAILED",
+                    "message": download_error,
+                },
+            })
+            continue
+        if not resolved_refs:
             pre_failed += 1
             items_out.append({
                 "item_id":      item_id,
@@ -1483,19 +1543,29 @@ def _handle_generate_flow_images(
                     "code":    "REFERENCE_IMAGE_MISSING",
                     "message": (
                         "Provide either reference_image_path (local "
-                        "file) or reference_image_url."
+                        "file), reference_image_url, or a non-empty "
+                        "reference_images array."
                     ),
                 },
             })
             continue
 
+        # Primary = first resolved ref. Phase-3 multi-ref sends them
+        # in role order so this is correct; legacy single-ref always
+        # produces just one entry here.
+        primary_path = resolved_refs[0][1]
+        additional_paths = [str(p) for (_, p) in resolved_refs[1:]]
+
         valid_items.append({
-            "item_id":              item_id,
-            "product_name":         product_name,
-            "reference_image_path": str(resolved_path),
-            "reference_source":     reference_source,
-            "downloaded_reference_path": downloaded_reference_path,
-            "image_prompt":         prompt,
+            "item_id":                  item_id,
+            "product_name":             product_name,
+            "reference_image_path":     str(primary_path),
+            "reference_image_paths":    [str(p) for (_, p) in resolved_refs],
+            "additional_image_paths":   additional_paths,
+            "reference_source":         ref_source_summary,
+            "downloaded_reference_path": str(primary_path)
+                if ref_source_summary == "url" else None,
+            "image_prompt":             prompt,
         })
 
     # Apply limit on the validated set so invalid items don't consume
@@ -1663,6 +1733,7 @@ def _handle_generate_flow_images(
                         page,
                         item["reference_image_path"],
                         item["image_prompt"],
+                        additional_image_paths=item.get("additional_image_paths") or None,
                         logger=logger,
                         selector_timeout_ms=settings.selector_timeout_ms,
                         generation_timeout_seconds=settings.generation_timeout_seconds,

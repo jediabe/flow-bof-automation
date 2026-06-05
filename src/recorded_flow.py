@@ -1435,6 +1435,7 @@ def perform_recorded_flow(
     image_path: str,
     prompt: str,
     *,
+    additional_image_paths: list[str] | None = None,
     logger: logging.Logger,
     selector_timeout_ms: int = 15_000,
     generation_timeout_seconds: int = 180,
@@ -1448,12 +1449,19 @@ def perform_recorded_flow(
 ) -> list[TileInfo]:
     """Run one Flow Labs generation through the click-generate step.
 
-    Success contract: reference thumbnail attached + prompt inserted +
-    generate arrow clicked. After the click we collect (best-effort)
+    Success contract: reference thumbnail(s) attached + prompt inserted
+    + generate arrow clicked. After the click we collect (best-effort)
     every new tile that appears within `capture_timeout_seconds` so we
     persist all variant `flow_media_id`s onto the CSV row — the user
     may heart any variant in Flow Labs and we want sync-favorites to
     match regardless of which one.
+
+    Phase 3 — multi-reference support: `image_path` is the primary
+    reference; `additional_image_paths` is an optional ordered list of
+    extra references (ref2, ref3) attached by repeating the same
+    upload → "+" → "Add to Prompt" sequence. Flow's composer accepts
+    multiple thumbnails — confirmed via the user's UI walkthrough
+    (clicking "+" again or drag/drop both work; we use "+").
 
     Returns the list of captured TileInfos, or an empty list when
     capture is disabled or nothing appeared in time. Raises
@@ -1462,54 +1470,80 @@ def perform_recorded_flow(
     prior_result_srcs = _snapshot_result_srcs(page) if wait_for_result else set()
     prior_tile_ids = _snapshot_tile_ids(page) if capture_tile else set()
 
-    # --- 1. Upload reference image ---
-    _locate_file_input(page).set_input_files(image_path)
-    logger.info("Uploaded image")
+    # Build the ordered list of images to attach. Primary first,
+    # supplementary refs after in the order the SaaS sent them.
+    all_image_paths: list[str] = [image_path] + list(additional_image_paths or [])
 
-    # --- 2. Click "+" in composer ---
-    _locate_plus_button(page).click(timeout=selector_timeout_ms)
-    logger.info("Clicked composer plus button")
-
-    # --- 3. Click "Add to Prompt", then confirm the thumbnail attached ---
-    #
-    # The "Add to Prompt" button stays `disabled` until Flow's backend
-    # finishes processing the upload from step 1. Most products clear
-    # in under a second, but every now and then (large image, slow
-    # server response, image format that needs a transcode step) Flow
-    # holds the button disabled for several seconds. The default
-    # Playwright .click() timeout is `selector_timeout_ms` (15s), which
-    # is the same value across safe/balanced/fast — when that's not
-    # enough we get a clean failure with "element is not enabled"
-    # across ~30 retries.
-    #
-    # Fix: explicitly wait for the button to become enabled with a
-    # longer budget than the click timeout, so a slow upload doesn't
-    # take the whole batch with it. We also re-locate after the wait
-    # because Flow occasionally swaps the underlying element between
-    # the disabled and enabled state, which can stale-element the
-    # locator we had a moment ago.
+    # --- Attach each reference image in turn. Steps 1-3 are repeated
+    # for each image; the prompt + submit happens once at the end.
     add_to_prompt_enable_timeout_ms = max(selector_timeout_ms * 3, 45_000)
-    try:
-        expect(_locate_add_to_prompt(page)).to_be_enabled(
-            timeout=add_to_prompt_enable_timeout_ms
+    for ref_idx, ref_path in enumerate(all_image_paths, start=1):
+        role_label = "primary" if ref_idx == 1 else f"ref{ref_idx}"
+        logger.info(
+            "Attaching reference image %d/%d (%s): %s",
+            ref_idx, len(all_image_paths), role_label, ref_path,
         )
-    except (AssertionError, PlaywrightTimeoutError) as exc:
-        raise RecordedFlowError(
-            f"'Add to Prompt' button stayed disabled for "
-            f"{add_to_prompt_enable_timeout_ms / 1000:.0f}s — Flow is "
-            "probably still processing the uploaded image, or the "
-            "upload itself failed. Try the row again."
-        ) from exc
-    _locate_add_to_prompt(page).click(timeout=selector_timeout_ms)
-    try:
-        expect(_locate_reference_thumbnail(page).first).to_be_visible(
-            timeout=selector_timeout_ms
+
+        # --- 1. Upload this reference image ---
+        _locate_file_input(page).set_input_files(ref_path)
+        logger.info("[%s] Uploaded image", role_label)
+
+        # --- 2. Click "+" in composer ---
+        _locate_plus_button(page).click(timeout=selector_timeout_ms)
+        logger.info("[%s] Clicked composer plus button", role_label)
+
+        # --- 3. Click "Add to Prompt", then confirm the thumbnail
+        #
+        # The "Add to Prompt" button stays `disabled` until Flow's
+        # backend finishes processing the upload from step 1. Most
+        # products clear in under a second, but every now and then
+        # (large image, slow server response, image format that
+        # needs a transcode step) Flow holds the button disabled
+        # for several seconds. The default Playwright .click()
+        # timeout is `selector_timeout_ms` (15s), which is the same
+        # value across safe/balanced/fast — when that's not enough
+        # we get a clean failure with "element is not enabled"
+        # across ~30 retries.
+        #
+        # Fix: explicitly wait for the button to become enabled
+        # with a longer budget than the click timeout, so a slow
+        # upload doesn't take the whole batch with it. We also re-
+        # locate after the wait because Flow occasionally swaps the
+        # underlying element between the disabled and enabled state,
+        # which can stale-element the locator we had a moment ago.
+        try:
+            expect(_locate_add_to_prompt(page)).to_be_enabled(
+                timeout=add_to_prompt_enable_timeout_ms
+            )
+        except (AssertionError, PlaywrightTimeoutError) as exc:
+            raise RecordedFlowError(
+                f"[{role_label}] 'Add to Prompt' button stayed disabled "
+                f"for {add_to_prompt_enable_timeout_ms / 1000:.0f}s — Flow "
+                "is probably still processing the uploaded image, or the "
+                "upload itself failed. Try the row again."
+            ) from exc
+        _locate_add_to_prompt(page).click(timeout=selector_timeout_ms)
+
+        # After the click, confirm at least `ref_idx` thumbnails are
+        # present. Counting is the cleanest cross-check: a multi-ref
+        # attach where the second image silently failed would still
+        # show one thumbnail; only the count tells us all attaches
+        # landed.
+        try:
+            expect(_locate_reference_thumbnail(page)).to_have_count(
+                ref_idx, timeout=selector_timeout_ms
+            )
+        except (AssertionError, PlaywrightTimeoutError) as exc:
+            raise RecordedFlowError(
+                f"[{role_label}] Expected {ref_idx} reference thumbnail(s) "
+                f"after Add to Prompt; count assertion failed. The "
+                "secondary attach path may not have wired up — verify "
+                "Flow's UI hasn't changed."
+            ) from exc
+        logger.info(
+            "[%s] Clicked Add to Prompt — %d thumbnail(s) attached",
+            role_label, ref_idx,
         )
-    except (AssertionError, PlaywrightTimeoutError) as exc:
-        raise RecordedFlowError(
-            "Reference thumbnail did not appear after Add to Prompt."
-        ) from exc
-    logger.info("Clicked Add to Prompt — reference thumbnail attached")
 
     # --- 4. Type prompt, confirm it is visible in the composer ---
     prompt_input = _locate_prompt_input(page)
