@@ -47,6 +47,7 @@ import logging
 import mimetypes
 import os
 import platform
+import random
 import re
 import sys
 import time
@@ -1575,7 +1576,41 @@ def _handle_generate_flow_images(
                 len(valid_items), settings.automation_mode, wait_mode,
             )
 
+            # Risk-engine detection state. Set on first hit; the loop
+            # exits at the next iteration boundary so the in-flight
+            # item finishes (or fails) cleanly without partial state.
+            flow_risk_code: str | None = None
+            flow_risk_after_item: int = 0
+
             for n, item in enumerate(valid_items, start=1):
+                # Google Flow's anti-abuse risk engine occasionally
+                # flags our session and starts rejecting submits with
+                # "We noticed some unusual activity" / "Too many
+                # requests" / "Try again later" tiles. Detecting
+                # between items (before burning another submit into
+                # an already-flagged tab) lets the batch stop early
+                # and surface a specific error code to the SaaS, who
+                # can then show a cooldown banner to the user.
+                #
+                # Detection is cheap (one page.evaluate over body
+                # innerText, no waits). Skipped on the first
+                # iteration because there's no prior submit yet —
+                # the very first item runs unconditionally.
+                if n > 1:
+                    from .recorded_flow import detect_flow_unusual_activity
+                    risk = detect_flow_unusual_activity(page)
+                    if risk:
+                        logger.warning(
+                            "Flow risk-engine triggered after item %d (%s). "
+                            "Stopping batch — the SaaS will surface a "
+                            "cooldown banner. Further submits would just "
+                            "push the risk score higher.",
+                            n - 1, risk,
+                        )
+                        flow_risk_code = risk
+                        flow_risk_after_item = n - 1
+                        break
+
                 logger.info(
                     "--- [%d/%d] item_id=%s product=%s",
                     n, len(valid_items),
@@ -1671,7 +1706,7 @@ def _handle_generate_flow_images(
                             },
                         },
                     )
-                    page.wait_for_timeout(settings.image_between_products_ms)
+                    page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
                     continue
                 except FlowAutomationError as exc:
                     failed += 1
@@ -1705,7 +1740,7 @@ def _handle_generate_flow_images(
                             },
                         },
                     )
-                    page.wait_for_timeout(settings.image_between_products_ms)
+                    page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
                     continue
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
@@ -1739,7 +1774,7 @@ def _handle_generate_flow_images(
                             },
                         },
                     )
-                    page.wait_for_timeout(settings.image_between_products_ms)
+                    page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
                     continue
 
                 # Success path. tiles is the list of newly captured
@@ -1767,7 +1802,7 @@ def _handle_generate_flow_images(
                         "media_id":     captured_media_id,
                     },
                 )
-                page.wait_for_timeout(settings.image_between_products_ms)
+                page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
 
     except FlowAutomationError as exc:
         msg = str(exc)
@@ -1787,6 +1822,50 @@ def _handle_generate_flow_images(
         )
 
     elapsed = round(time.monotonic() - started_at, 2)
+
+    # Risk-engine short-circuit. The loop sets `flow_risk_code` when
+    # Flow's anti-abuse text appears between submits; we bail with a
+    # specific failure code so the SaaS can surface a cooldown banner
+    # to the user instead of treating the batch as a normal partial
+    # success.
+    if flow_risk_code:
+        emit(
+            "rate_limited",
+            f"Google Flow risk-engine error detected ({flow_risk_code}). "
+            f"Stopped after {submitted} successful submit(s); "
+            f"{len(valid_items) - flow_risk_after_item} item(s) "
+            f"unsubmitted. Wait 30-60 minutes before trying again.",
+            details={
+                "code":                "FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY",
+                "risk_phrase":         flow_risk_code,
+                "stopped_after_item":  flow_risk_after_item,
+                "submitted":           submitted,
+                "failed":              failed,
+                "unsubmitted":         len(valid_items) - flow_risk_after_item,
+                "elapsed_seconds":     elapsed,
+            },
+        )
+        return _failure(
+            job,
+            "FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY",
+            (
+                f"Google Flow flagged the session as 'unusual activity' "
+                f"after item {flow_risk_after_item}. Stopped to avoid "
+                f"raising the risk score further. Wait 30-60 minutes "
+                f"and try again; consider running smaller batches with "
+                f"longer between-product delays."
+            ),
+            details={
+                "risk_phrase":         flow_risk_code,
+                "stopped_after_item":  flow_risk_after_item,
+                "submitted":           submitted,
+                "failed":              failed,
+                "unsubmitted":         len(valid_items) - flow_risk_after_item,
+                "items":               items_out,
+                "elapsed_seconds":     elapsed,
+            },
+        )
+
     emit("complete", "Image generation complete.", details={
         "submitted":       submitted,
         "failed":          failed,

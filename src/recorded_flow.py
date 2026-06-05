@@ -1166,6 +1166,82 @@ def _locate_generation_in_progress(page: Page) -> Locator:
 
 
 # ---------------------------------------------------------------------------
+# Google Flow risk-engine detection
+# ---------------------------------------------------------------------------
+#
+# Flow shows several distinct error states when its anti-abuse risk
+# engine decides our session is suspicious. They render on individual
+# result tiles AND occasionally as page-level banners. Phrases we've
+# observed in the wild:
+#
+#   - "We noticed some unusual activity. Please visit the Help Center
+#     for more information."  (screenshot from a tester, 2026-06-05)
+#   - "Too many requests. Please try again later."
+#   - "Rate limit exceeded."
+#   - "We were unable to complete your request right now."  (generic
+#     soft-block variant — sometimes recoverable, often not)
+#
+# When ANY of these appear, the runner should stop the current batch
+# and let the SaaS surface the failure to the user. Continuing to
+# submit images would just produce more failed tiles AND raise the
+# risk score further, making the cooldown longer.
+#
+# We detect via a single page.evaluate that walks document.body's
+# innerText. Cheap (one round-trip), tolerant of DOM churn (no
+# selectors), and returns a short code so the runner caller can
+# discriminate per pattern when needed.
+
+# Mapping: pattern → short error code returned to the caller.
+# Order matters — first match wins so we report the most specific
+# variant we can identify.
+_FLOW_RISK_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("noticed some unusual activity",   "unusual_activity"),
+    ("we noticed unusual activity",     "unusual_activity"),
+    ("unusual activity",                "unusual_activity"),
+    ("too many requests",               "too_many_requests"),
+    ("rate limit",                      "rate_limit"),
+    ("try again later",                 "try_again_later"),
+    ("we were unable to complete",      "soft_block"),
+)
+
+
+_RISK_DETECT_JS = r"""
+() => {
+  // Walk the body's visible text. Lowercase once for case-insensitive
+  // includes(). Limit length so a runaway page doesn't blow the
+  // serialization budget.
+  const raw = (document.body && document.body.innerText) || '';
+  return raw.slice(0, 40000).toLowerCase();
+}
+"""
+
+
+def detect_flow_unusual_activity(page: Page) -> str | None:
+    """Scan Flow's currently-rendered body text for risk-engine
+    error phrases. Returns a short code (e.g. "unusual_activity",
+    "rate_limit") when one matches, None when the page looks clean.
+
+    Cheap to call — one page.evaluate per check. Designed to be
+    invoked after every per-item submit in the bulk image / video
+    loops so the runner can stop the batch promptly rather than
+    burning more submits into a Flow tab Google is already flagging.
+
+    Never raises — diagnostics must not be the thing that takes
+    down a runner.
+    """
+    try:
+        body_lower = page.evaluate(_RISK_DETECT_JS) or ""
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(body_lower, str) or not body_lower:
+        return None
+    for needle, code in _FLOW_RISK_PATTERNS:
+        if needle in body_lower:
+            return code
+    return None
+
+
+# ---------------------------------------------------------------------------
 # New-project setup (runs once per day, when starting fresh)
 # ---------------------------------------------------------------------------
 
