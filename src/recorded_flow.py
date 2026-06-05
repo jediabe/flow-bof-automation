@@ -1022,6 +1022,11 @@ def _locate_reference_thumbnail(page: Page) -> Locator:
     # The composer is NOT a <form>; do not scope to one. Matching the
     # IMG directly is the most reliable signal that the reference has
     # been attached. We OR three selectors so any of them can resolve.
+    #
+    # Returns `.first` because the original single-image flow only
+    # needs to assert "at least one thumbnail visible". Phase-3
+    # multi-ref needs to count thumbnails — use
+    # `_locate_all_reference_thumbnails` for that.
     return page.locator(
         ", ".join([
             'button img[src*="media.getMediaUrlRedirect"]',
@@ -1029,6 +1034,22 @@ def _locate_reference_thumbnail(page: Page) -> Locator:
             'img[src*="/fx/api/trpc/media.getMediaUrlRedirect"]',
         ])
     ).first
+
+
+def _locate_all_reference_thumbnails(page: Page) -> Locator:
+    """Phase 3 — same selector set as _locate_reference_thumbnail but
+    WITHOUT `.first`, so the resulting locator's .count() can grow
+    past 1. Used for the "N thumbnails attached" assertion after each
+    multi-ref attach iteration. Do NOT use for visibility checks;
+    that's still what _locate_reference_thumbnail is for.
+    """
+    return page.locator(
+        ", ".join([
+            'button img[src*="media.getMediaUrlRedirect"]',
+            'img[alt*="media generated or uploaded"]',
+            'img[src*="/fx/api/trpc/media.getMediaUrlRedirect"]',
+        ])
+    )
 
 
 def _locate_result_images(page: Page) -> Locator:
@@ -1529,8 +1550,13 @@ def perform_recorded_flow(
         # attach where the second image silently failed would still
         # show one thumbnail; only the count tells us all attaches
         # landed.
+        #
+        # IMPORTANT: use the `_all` variant. _locate_reference_thumbnail
+        # ends with .first and its count is therefore always 0 or 1 —
+        # a to_have_count(2) assertion against it would never pass and
+        # would time out the entire multi-ref product.
         try:
-            expect(_locate_reference_thumbnail(page)).to_have_count(
+            expect(_locate_all_reference_thumbnails(page)).to_have_count(
                 ref_idx, timeout=selector_timeout_ms
             )
         except (AssertionError, PlaywrightTimeoutError) as exc:
