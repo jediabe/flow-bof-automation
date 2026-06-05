@@ -104,6 +104,110 @@ def _platform_asset_ext() -> str | None:
     return None
 
 
+def _enable_paste(entry: ttk.Entry, root: tk.Tk) -> None:
+    """Make an Entry widget paste-friendly on every platform.
+
+    Tk on macOS ships without consistent ``Cmd+V`` / right-click
+    paste support depending on the Tk build (Tahoe Tk 9.0 in
+    particular has flaky defaults). Older testers also report that
+    the macOS Edit menu's Paste item doesn't appear because Tkinter
+    apps don't auto-build a menu bar.
+
+    This helper attaches:
+
+      - Explicit ``<Command-v>`` / ``<Control-v>`` paste bindings
+        (plus the matching cut / copy / select-all set) that route
+        through ``root.clipboard_get()`` — works regardless of
+        whatever default bindings Tk thinks it has.
+      - A right-click / Control-click context menu with Cut, Copy,
+        Paste, Select All.
+
+    The Paste BUTTON next to the field is still the primary
+    discoverable affordance; these bindings are for users who reach
+    for the keyboard / right-click first.
+    """
+    def _do_paste(_event: tk.Event | None = None) -> str:
+        try:
+            clip = root.clipboard_get()
+        except tk.TclError:
+            return "break"
+        try:
+            if entry.selection_present():
+                entry.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+        try:
+            entry.insert(tk.INSERT, clip)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _do_copy(_event: tk.Event | None = None) -> str:
+        try:
+            sel = entry.selection_get()
+        except tk.TclError:
+            return "break"
+        root.clipboard_clear()
+        root.clipboard_append(sel)
+        return "break"
+
+    def _do_cut(_event: tk.Event | None = None) -> str:
+        try:
+            sel = entry.selection_get()
+            entry.delete("sel.first", "sel.last")
+        except tk.TclError:
+            return "break"
+        root.clipboard_clear()
+        root.clipboard_append(sel)
+        return "break"
+
+    def _do_select_all(_event: tk.Event | None = None) -> str:
+        entry.select_range(0, tk.END)
+        entry.icursor(tk.END)
+        return "break"
+
+    # Bind both Command (mac) and Control (everyone else) variants of
+    # each shortcut. Tk dispatches by exact match, so both
+    # upper-case + lower-case bindings are needed for Caps Lock
+    # tolerance.
+    keybindings = [
+        ("<Command-v>", _do_paste), ("<Command-V>", _do_paste),
+        ("<Control-v>", _do_paste), ("<Control-V>", _do_paste),
+        ("<Command-c>", _do_copy),  ("<Command-C>", _do_copy),
+        ("<Control-c>", _do_copy),  ("<Control-C>", _do_copy),
+        ("<Command-x>", _do_cut),   ("<Command-X>", _do_cut),
+        ("<Control-x>", _do_cut),   ("<Control-X>", _do_cut),
+        ("<Command-a>", _do_select_all), ("<Command-A>", _do_select_all),
+        ("<Control-a>", _do_select_all), ("<Control-A>", _do_select_all),
+    ]
+    for seq, handler in keybindings:
+        entry.bind(seq, handler)
+
+    # Right-click context menu. tk.Menu is the native Mac menu on
+    # macOS — looks correct out of the box.
+    menu = tk.Menu(entry, tearoff=0)
+    menu.add_command(label="Cut", command=_do_cut)
+    menu.add_command(label="Copy", command=_do_copy)
+    menu.add_command(label="Paste", command=_do_paste)
+    menu.add_separator()
+    menu.add_command(label="Select All", command=_do_select_all)
+
+    def _show_menu(event: tk.Event) -> None:
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            # Always release the grab even if tk_popup raises so we
+            # don't leave the user with a frozen UI.
+            menu.grab_release()
+
+    # On macOS, the canonical "right-click" is Button-2 OR
+    # Control-Button-1; on Linux/Windows it's Button-3. Bind all
+    # three so whichever the user reaches for works.
+    entry.bind("<Button-2>", _show_menu)
+    entry.bind("<Button-3>", _show_menu)
+    entry.bind("<Control-Button-1>", _show_menu)
+
+
 def _pick_asset_for_platform(assets: list) -> dict | None:
     """Find the right binary in a GitHub release's `assets[]` list.
 
@@ -956,6 +1060,7 @@ class RunnerGUI:
         saas_var = tk.StringVar(value=cfg.saas_base_url or DEFAULT_SAAS_URL)
         saas_entry = ttk.Entry(wrap, textvariable=saas_var, width=58)
         saas_entry.pack(anchor=tk.W, pady=(2, 2), fill=tk.X)
+        _enable_paste(saas_entry, self.root)
         ttk.Label(
             wrap,
             text=f"Default: {DEFAULT_SAAS_URL}",
@@ -968,10 +1073,53 @@ class RunnerGUI:
             token_label = f"Runner token   (current: {cfg.token_masked()})"
         ttk.Label(wrap, text=token_label, style="TLabel").pack(anchor=tk.W)
         token_var = tk.StringVar(value="")
+
+        # Inline row: [token_entry stretches] [Paste button].
+        # The Paste button is the load-bearing affordance — Tk on
+        # macOS has unreliable Cmd+V / right-click paste support
+        # depending on the build, but a click on this button
+        # ALWAYS works because it calls root.clipboard_get()
+        # directly. _enable_paste() adds the keyboard + right-click
+        # paths on top for users who reach for those first.
+        token_row = ttk.Frame(wrap, style="TFrame")
+        token_row.pack(anchor=tk.W, pady=(2, 2), fill=tk.X)
+
         token_entry = ttk.Entry(
-            wrap, textvariable=token_var, width=58, show="•",
+            token_row, textvariable=token_var, show="•",
         )
-        token_entry.pack(anchor=tk.W, pady=(2, 2), fill=tk.X)
+        token_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        _enable_paste(token_entry, self.root)
+
+        def _paste_token() -> None:
+            try:
+                clip = (self.root.clipboard_get() or "").strip()
+            except tk.TclError:
+                messagebox.showinfo(
+                    "Paste",
+                    "Clipboard is empty. Copy the runner token first.",
+                    parent=dlg,
+                )
+                return
+            if not clip:
+                messagebox.showinfo(
+                    "Paste",
+                    "Clipboard is empty. Copy the runner token first.",
+                    parent=dlg,
+                )
+                return
+            # Replace the field's content rather than appending — the
+            # user almost certainly wants to swap the saved token, not
+            # concatenate.
+            token_var.set(clip)
+            # Visible feedback: select the pasted text so the user
+            # sees "yes, the field has new content now".
+            token_entry.select_range(0, tk.END)
+            token_entry.icursor(tk.END)
+            token_entry.focus_set()
+
+        ttk.Button(
+            token_row, text="Paste", command=_paste_token,
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         show_var = tk.BooleanVar(value=False)
         def _toggle_show() -> None:
