@@ -1493,27 +1493,58 @@ def perform_recorded_flow(
 
     # Build the ordered list of images to attach. Primary first,
     # supplementary refs after in the order the SaaS sent them.
-    all_image_paths: list[str] = [image_path] + list(additional_image_paths or [])
+    # Cap to 3 — Phase 3 supports up to ref3 only.
+    all_image_paths: list[str] = (
+        [image_path] + list(additional_image_paths or [])
+    )[:3]
+    n_total = len(all_image_paths)
+    logger.info(
+        "Reference images to attach: %d (paths=%s)",
+        n_total, all_image_paths,
+    )
+
+    # Snapshot the number of media thumbnails currently visible on
+    # the page BEFORE we attach anything. Flow's UI may show past
+    # uploads in a sidebar/library that share the same DOM signature
+    # as composer-attached thumbnails. Without this snapshot, an
+    # absolute `to_have_count(N)` assertion expects total=N, but the
+    # real condition is "N MORE than we started with."
+    #
+    # The locator selects every matching img on the page — sidebar +
+    # library + composer. After each Add to Prompt, the count grows
+    # by exactly one as the new thumbnail joins the composer.
+    initial_thumbnail_count = _locate_all_reference_thumbnails(page).count()
+    logger.info(
+        "Reference-thumbnail snapshot before attach: count=%d "
+        "(includes sidebar/library; deltas drive per-attach assertions)",
+        initial_thumbnail_count,
+    )
 
     # --- Attach each reference image in turn. Steps 1-3 are repeated
     # for each image; the prompt + submit happens once at the end.
     add_to_prompt_enable_timeout_ms = max(selector_timeout_ms * 3, 45_000)
     for ref_idx, ref_path in enumerate(all_image_paths, start=1):
-        role_label = "primary" if ref_idx == 1 else f"ref{ref_idx}"
+        role_label = f"{ref_idx}/{n_total}"
         logger.info(
-            "Attaching reference image %d/%d (%s): %s",
-            ref_idx, len(all_image_paths), role_label, ref_path,
+            "Attaching reference %s: %s",
+            role_label, ref_path,
         )
 
         # --- 1. Upload this reference image ---
+        # Re-locate the file input every iteration. Flow keeps a
+        # single hidden <input type="file"> but if it ever swaps
+        # the element on us, .first picks up whichever one is live.
         _locate_file_input(page).set_input_files(ref_path)
-        logger.info("[%s] Uploaded image", role_label)
+        logger.info("[ref %s] Uploaded image", role_label)
 
         # --- 2. Click "+" in composer ---
+        # The JS picker re-runs each call and tags the chosen
+        # button with data-flow-bof-plus, so it survives DOM
+        # reshuffles between iterations.
         _locate_plus_button(page).click(timeout=selector_timeout_ms)
-        logger.info("[%s] Clicked composer plus button", role_label)
+        logger.info("[ref %s] Clicked composer plus button", role_label)
 
-        # --- 3. Click "Add to Prompt", then confirm the thumbnail
+        # --- 3. Click "Add to Prompt"
         #
         # The "Add to Prompt" button stays `disabled` until Flow's
         # backend finishes processing the upload from step 1. Most
@@ -1538,48 +1569,77 @@ def perform_recorded_flow(
             )
         except (AssertionError, PlaywrightTimeoutError) as exc:
             raise RecordedFlowError(
-                f"[{role_label}] 'Add to Prompt' button stayed disabled "
+                f"[ref {role_label}] 'Add to Prompt' button stayed disabled "
                 f"for {add_to_prompt_enable_timeout_ms / 1000:.0f}s — Flow "
                 "is probably still processing the uploaded image, or the "
                 "upload itself failed. Try the row again."
             ) from exc
         _locate_add_to_prompt(page).click(timeout=selector_timeout_ms)
 
-        # After the click, confirm at least `ref_idx` thumbnails are
-        # present. Counting is the cleanest cross-check: a multi-ref
-        # attach where the second image silently failed would still
-        # show one thumbnail; only the count tells us all attaches
-        # landed.
-        #
-        # IMPORTANT: use the `_all` variant. _locate_reference_thumbnail
-        # ends with .first and its count is therefore always 0 or 1 —
-        # a to_have_count(2) assertion against it would never pass and
-        # would time out the entire multi-ref product.
+        # --- 4. Verify the attach landed by DELTA against the
+        #        snapshot, not an absolute count. The sidebar /
+        #        library imgs share the selector signature; only the
+        #        delta tells us whether the composer gained a new
+        #        attachment.
+        expected_count = initial_thumbnail_count + ref_idx
         try:
             expect(_locate_all_reference_thumbnails(page)).to_have_count(
-                ref_idx, timeout=selector_timeout_ms
+                expected_count, timeout=selector_timeout_ms
             )
         except (AssertionError, PlaywrightTimeoutError) as exc:
+            observed = _locate_all_reference_thumbnails(page).count()
             raise RecordedFlowError(
-                f"[{role_label}] Expected {ref_idx} reference thumbnail(s) "
-                f"after Add to Prompt; count assertion failed. The "
-                "secondary attach path may not have wired up — verify "
-                "Flow's UI hasn't changed."
+                f"[ref {role_label}] Expected total reference-thumbnail "
+                f"count to reach {expected_count} after Add to Prompt "
+                f"(snapshot {initial_thumbnail_count} + {ref_idx} attached), "
+                f"observed {observed}. The Add to Prompt click did not "
+                "produce a new composer attachment. Possible causes: Flow's "
+                "upload silently failed, the secondary attach path is "
+                "different from the first, or the thumbnail selector no "
+                "longer matches Flow's current DOM."
             ) from exc
         logger.info(
-            "[%s] Clicked Add to Prompt — %d thumbnail(s) attached",
-            role_label, ref_idx,
+            "[ref %s] Attached reference %d/%d (total thumbnails now %d, "
+            "snapshot was %d)",
+            role_label, ref_idx, n_total,
+            expected_count, initial_thumbnail_count,
         )
 
     # --- 4. Type prompt, confirm it is visible in the composer ---
+    #
+    # Defensive wait + re-locate. After the multi-ref attach loop the
+    # composer DOM has been re-rendered several times; the prompt
+    # input we'd locate up front would be stale. Wait for it to be
+    # visible AND attached before we click + fill. Without this the
+    # multi-ref path occasionally tried to click a detached element
+    # and the fill was lost.
+    try:
+        expect(_locate_prompt_input(page)).to_be_visible(
+            timeout=selector_timeout_ms
+        )
+    except (AssertionError, PlaywrightTimeoutError) as exc:
+        raise RecordedFlowError(
+            "Prompt input not visible after attach loop. The composer "
+            "may be in a transitional state — Flow's Add to Prompt "
+            "popover may not have dismissed."
+        ) from exc
     prompt_input = _locate_prompt_input(page)
     prompt_input.click()
     prompt_input.fill(prompt)
     if not _is_prompt_text_present(prompt_input, prompt):
-        raise RecordedFlowError(
-            "Prompt text not visible in composer after fill(); refusing to "
-            "log 'Prompt inserted'."
+        # Retry once — a stale fill on a recently re-rendered
+        # contenteditable can drop the text on the first try.
+        logger.warning(
+            "Prompt text not visible after first fill; re-locating + retrying."
         )
+        prompt_input = _locate_prompt_input(page)
+        prompt_input.click()
+        prompt_input.fill(prompt)
+        if not _is_prompt_text_present(prompt_input, prompt):
+            raise RecordedFlowError(
+                "Prompt text not visible in composer after fill() (retry "
+                "exhausted); refusing to log 'Prompt inserted'."
+            )
     logger.info("Prompt inserted")
 
     # --- 5. Confirm arrow is enabled and click ---
