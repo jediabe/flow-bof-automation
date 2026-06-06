@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.5-alpha"
+APP_VERSION = "0.6.6-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +288,111 @@ def _tile_to_item(tile) -> dict:
     }
 
 
+# Phase 6 — thumbnail bundling. The SaaS browser can't fetch
+# labs.google's authenticated /fx/api/.../media.getMediaUrlRedirect
+# URLs cross-origin. So the runner — which IS in an authenticated
+# Flow tab — downloads each tile's thumbnail using the page's
+# Playwright `request` context (carries the user's Google session
+# cookies automatically) and ships it back as base64 in the scan
+# result. The SaaS ingester then writes those bytes to /uploads/
+# and serves the thumbnails from there.
+#
+# Caps to keep the JSON payload sane:
+#   - per-image: 256 KB max — Flow's thumbnails are usually 10-30
+#     KB so this is generous. Skip anything bigger.
+#   - per-scan total: 10 MB across all thumbnails. Stop bundling
+#     after that; remaining items get no thumbnail_b64.
+_FLOW_THUMBNAIL_PER_IMAGE_LIMIT = 256 * 1024
+_FLOW_THUMBNAIL_PER_SCAN_LIMIT = 10 * 1024 * 1024
+
+
+def _bundle_thumbnails_into_items(
+    page,
+    items: list[dict],
+    logger: logging.Logger,
+) -> dict:
+    """Walk `items` (mutated in place) and add `thumbnail_b64` +
+    `thumbnail_mime` fields where possible.
+
+    Failures don't raise — the result envelope reports counts.
+    A tile without a downloadable thumbnail simply has no
+    thumbnail_b64 field; the SaaS UI falls back to a placeholder
+    + the media_id label.
+
+    Uses `page.request.fetch()` so the request runs through the
+    same Playwright browser context as the page — Google session
+    cookies attach automatically.
+    """
+    import base64 as _b64
+
+    if not items:
+        return {"attempted": 0, "ok": 0, "skipped_too_big": 0, "failed": 0}
+
+    attempted = 0
+    ok = 0
+    skipped_too_big = 0
+    failed = 0
+    total_bytes = 0
+
+    for it in items:
+        src = (it.get("thumbnail_src") or "").strip()
+        if not src:
+            continue
+        if total_bytes >= _FLOW_THUMBNAIL_PER_SCAN_LIMIT:
+            # Per-scan cap reached — skip the rest. The SaaS shows
+            # those with no thumbnail; user can re-scan with fewer
+            # tiles or we can raise the cap in a follow-up.
+            continue
+        attempted += 1
+        try:
+            resp = page.request.fetch(src, timeout=10_000)
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.debug(
+                "Thumbnail fetch failed for media=%s: %s: %s",
+                (it.get("media_id") or "?")[:12],
+                type(exc).__name__, exc,
+            )
+            continue
+        if not resp.ok:
+            failed += 1
+            logger.debug(
+                "Thumbnail fetch returned %s for media=%s",
+                resp.status, (it.get("media_id") or "?")[:12],
+            )
+            continue
+        try:
+            body = resp.body()
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.debug("Thumbnail body read failed: %s", exc)
+            continue
+        if len(body) > _FLOW_THUMBNAIL_PER_IMAGE_LIMIT:
+            skipped_too_big += 1
+            continue
+        # Content-type from headers; default to image/jpeg if Flow
+        # didn't say. Anthropic accepts jpeg/png/webp/gif; the SaaS
+        # ingester just trusts the bytes.
+        ct_raw = ""
+        try:
+            ct_raw = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        except Exception:  # noqa: BLE001
+            pass
+        mime = ct_raw if ct_raw.startswith("image/") else "image/jpeg"
+        it["thumbnail_b64"] = _b64.b64encode(body).decode("ascii")
+        it["thumbnail_mime"] = mime
+        total_bytes += len(body)
+        ok += 1
+
+    return {
+        "attempted": attempted,
+        "ok": ok,
+        "skipped_too_big": skipped_too_big,
+        "failed": failed,
+        "total_bytes": total_bytes,
+    }
+
+
 def _handle_scan_favorited_images(
     job: dict,
     logger: logging.Logger,
@@ -392,6 +497,39 @@ def _handle_scan_favorited_images(
                     f"scan_tiles raised: {type(exc).__name__}: {exc}",
                 )
 
+            # Phase 6 — bundle thumbnails into the items so the SaaS
+            # can save + serve them locally. We build the filtered
+            # list here (still inside the `with` block) so the
+            # downloads run while `page` is alive; the outer block
+            # just consumes the bundled items.
+            _favorited_images_count = sum(
+                1 for t in tiles
+                if t.favorited and (t.kind == "image" or t.kind == "")
+            )
+            _favorited_videos_count = sum(
+                1 for t in tiles
+                if t.favorited and t.kind == "video"
+            )
+            _filtered: list[dict] = []
+            for t in tiles:
+                if t.kind == "video" and not include_videos:
+                    continue
+                if not t.favorited and not include_non_favorites:
+                    continue
+                _filtered.append(_tile_to_item(t))
+                if len(_filtered) >= limit:
+                    break
+            _thumb_stats = _bundle_thumbnails_into_items(page, _filtered, logger)
+            logger.info(
+                "Thumbnail bundling: attempted=%d ok=%d failed=%d "
+                "skipped_too_big=%d total_bytes=%d",
+                _thumb_stats.get("attempted", 0),
+                _thumb_stats.get("ok", 0),
+                _thumb_stats.get("failed", 0),
+                _thumb_stats.get("skipped_too_big", 0),
+                _thumb_stats.get("total_bytes", 0),
+            )
+
     except FlowAutomationError as exc:
         msg = str(exc)
         # FlowAutomationError covers both "couldn't connect to Chrome"
@@ -416,25 +554,12 @@ def _handle_scan_favorited_images(
             f"{type(exc).__name__}: {exc}",
         )
 
-    # ---- Build the result. Counts use the FULL scan; items get filtered. ----
-    favorited_images_count = sum(
-        1 for t in tiles
-        if t.favorited and (t.kind == "image" or t.kind == "")
-    )
-    favorited_videos_count = sum(
-        1 for t in tiles
-        if t.favorited and t.kind == "video"
-    )
-
-    filtered: list[dict] = []
-    for t in tiles:
-        if t.kind == "video" and not include_videos:
-            continue
-        if not t.favorited and not include_non_favorites:
-            continue
-        filtered.append(_tile_to_item(t))
-        if len(filtered) >= limit:
-            break
+    # Counts + filtered list were built inside the `with` block above
+    # (so the thumbnail downloads could run while the Flow page was
+    # still alive). Mirror them onto local names for the result.
+    favorited_images_count = _favorited_images_count
+    favorited_videos_count = _favorited_videos_count
+    filtered = _filtered
 
     return _success(job, {
         "chrome_reachable":       True,
@@ -444,6 +569,8 @@ def _handle_scan_favorited_images(
         "favorited_images_count": favorited_images_count,
         "favorited_videos_count": favorited_videos_count,
         "items":                  filtered,
+        # Phase 6 — diagnostics for the bundling step.
+        "thumbnail_bundle_stats": _thumb_stats,
     })
 
 
