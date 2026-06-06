@@ -996,60 +996,253 @@ def _short_err(exc: Exception) -> str:
 
 def _locate_prompt_input(page: Page) -> Locator:
     # Recorded: input events fired on a contenteditable div at (698, 881)
-    # with role="textbox" and contenteditable="true". The visible
-    # "What do you want to create?" text is on a sibling <p>, not this
-    # element directly, so we target the editable host instead of a
-    # placeholder attribute.
-    return page.locator('div[role="textbox"][contenteditable="true"]').first
+    # with role="textbox" and contenteditable="true". Scoped to the
+    # active composer root via the JS marker so a Flow tab with both
+    # an image composer AND a video composer can't cross-fire.
+    composer = _locate_active_composer(page)
+    return composer.locator(
+        'div[role="textbox"][data-slate-editor="true"][contenteditable="true"]'
+    ).first
 
 
 def _locate_generate_arrow(page: Page) -> Locator:
-    # Recorded at (1248, 918) with combined text "arrow_forward\nCreate".
-    # "arrow_forward" is the Material Symbols icon ligature; unique to
-    # this bottom-right send button.
-    return page.locator("button").filter(has_text="arrow_forward").first
+    # The "arrow_forward" Material Symbols icon ligature is unique to
+    # the bottom-right send button. Scope to the active composer root
+    # so a video-composer arrow elsewhere in the DOM can't be picked
+    # instead.
+    composer = _locate_active_composer(page)
+    return composer.locator("button").filter(has_text="arrow_forward").first
 
 
 def _locate_reference_thumbnail(page: Page) -> Locator:
-    # Confirmed DOM (from devtools):
+    # Confirmed DOM (from user-supplied composer snapshot):
+    #   <div role="textbox" data-slate-editor="true" contenteditable="true">
+    #   ...
     #   <button data-card-open="false" data-state="closed">
     #     <div><img src="/fx/api/trpc/media.getMediaUrlRedirect?name=..."
     #               alt="A piece of media generated or uploaded by you,
     #                    that is present in your collection." ...></div>
-    #     ...
+    #     <div><i class="google-symbols">cancel</i></div>
     #   </button>
     #
-    # The composer is NOT a <form>; do not scope to one. Matching the
-    # IMG directly is the most reliable signal that the reference has
-    # been attached. We OR three selectors so any of them can resolve.
+    # Attached references in the composer's attachment strip use
+    # `<button data-card-open>` as the chip wrapper. We scope to the
+    # active composer root + that wrapper attribute so sidebar /
+    # gallery / result thumbnails outside the composer can't be
+    # counted accidentally.
     #
     # Returns `.first` because the original single-image flow only
     # needs to assert "at least one thumbnail visible". Phase-3
     # multi-ref needs to count thumbnails — use
     # `_locate_all_reference_thumbnails` for that.
-    return page.locator(
-        ", ".join([
-            'button img[src*="media.getMediaUrlRedirect"]',
-            'img[alt*="media generated or uploaded"]',
-            'img[src*="/fx/api/trpc/media.getMediaUrlRedirect"]',
-        ])
+    composer = _locate_active_composer(page)
+    return composer.locator(
+        'button[data-card-open] img[src*="media.getMediaUrlRedirect"]'
     ).first
 
 
 def _locate_all_reference_thumbnails(page: Page) -> Locator:
-    """Phase 3 — same selector set as _locate_reference_thumbnail but
+    """Phase 3 — composer-local attachment counter.
+
+    Same chip-wrapper selector as _locate_reference_thumbnail but
     WITHOUT `.first`, so the resulting locator's .count() can grow
-    past 1. Used for the "N thumbnails attached" assertion after each
-    multi-ref attach iteration. Do NOT use for visibility checks;
-    that's still what _locate_reference_thumbnail is for.
+    past 1. CRITICAL: this is scoped to the active composer root
+    via _locate_active_composer so it counts ONLY composer-attached
+    references — never sidebar / library / gallery / result tiles
+    elsewhere on the page. The composer is identified by walking up
+    from the visible slate textbox until we find an ancestor that
+    also contains the arrow_forward submit button.
     """
-    return page.locator(
-        ", ".join([
-            'button img[src*="media.getMediaUrlRedirect"]',
-            'img[alt*="media generated or uploaded"]',
-            'img[src*="/fx/api/trpc/media.getMediaUrlRedirect"]',
-        ])
+    composer = _locate_active_composer(page)
+    return composer.locator(
+        'button[data-card-open] img[src*="media.getMediaUrlRedirect"]'
     )
+
+
+# ---------------------------------------------------------------------
+# Active composer locator
+# ---------------------------------------------------------------------
+#
+# Why this exists: Flow renders the same DOM signatures in multiple
+# places — past uploads in the sidebar/library use the same
+# /fx/api/trpc/media.getMediaUrlRedirect img sources, and the page
+# may also contain a video composer alongside the image composer.
+# Without scoping, a global thumbnail count picks up everything and
+# the per-attach assertion ("expected 1, observed 2") fails because
+# Flow had pre-existing library thumbnails or another composer.
+#
+# Approach: find the visible slate textbox (the image composer
+# explicitly uses data-slate-editor="true"), walk up to the closest
+# ancestor that ALSO contains the arrow_forward submit button, and
+# tag THAT element with data-flow-bof-composer="1". Subsequent
+# locators bind to '[data-flow-bof-composer="1"]' so all attachment
+# / textbox / arrow lookups stay scoped to the same active root.
+
+_COMPOSER_ROOT_TAG_JS = r"""
+() => {
+  const isVisible = el => {
+    const r = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    return r.width > 0 && r.height > 0 &&
+           cs.visibility !== 'hidden' && cs.display !== 'none' &&
+           parseFloat(cs.opacity) > 0;
+  };
+
+  // Primary signal: the image composer's slate textbox. Used by
+  // Flow's image-generation surface and confirmed via DOM evidence.
+  let candidates = Array.from(document.querySelectorAll(
+    'div[role="textbox"][data-slate-editor="true"][contenteditable="true"]'
+  )).filter(isVisible);
+
+  // Fallback: any contenteditable textbox with role=textbox. Lets
+  // this helper work for the video composer too (or any future Flow
+  // composer variant that drops the slate marker). The walk-up below
+  // still scopes to an ancestor that contains an arrow_forward
+  // submit button, so we don't accidentally pick up a side panel.
+  if (candidates.length === 0) {
+    candidates = Array.from(document.querySelectorAll(
+      'div[role="textbox"][contenteditable="true"]'
+    )).filter(isVisible);
+  }
+
+  if (candidates.length === 0) {
+    return {error: 'no visible role=textbox contenteditable found'};
+  }
+  const textbox = candidates[0];
+
+  // Walk up until we find an ancestor that contains the submit
+  // arrow button. The submit button is a <button> containing
+  // <i class="google-symbols"> with text "arrow_forward". Walking
+  // up at most 12 levels is generous — in practice the composer
+  // root is 3-5 levels above the textbox.
+  let scope = textbox;
+  for (let depth = 1; depth <= 12; depth++) {
+    if (!scope.parentElement) break;
+    scope = scope.parentElement;
+    const icons = scope.querySelectorAll('button i.google-symbols');
+    let foundArrow = false;
+    for (const i of icons) {
+      if ((i.textContent || '').trim() === 'arrow_forward') {
+        foundArrow = true;
+        break;
+      }
+    }
+    if (foundArrow) {
+      // Clear any prior marker so the locator can't accidentally
+      // bind to a stale root.
+      document.querySelectorAll('[data-flow-bof-composer]').forEach(
+        e => e.removeAttribute('data-flow-bof-composer')
+      );
+      scope.setAttribute('data-flow-bof-composer', '1');
+      // Also count current attachments inside this root, for log.
+      const attachmentCount = scope.querySelectorAll(
+        'button[data-card-open] img[src*="media.getMediaUrlRedirect"]'
+      ).length;
+      return {ok: true, depth, attachment_count: attachmentCount};
+    }
+  }
+  return {error: 'walked up 12 levels without finding arrow_forward submit button'};
+}
+"""
+
+
+def _locate_active_composer(page: Page) -> Locator:
+    """Find the active prompt composer root and return a Locator
+    bound to its data-flow-bof-composer marker.
+
+    This re-runs the JS on every call (cheap — a single querySelector
+    + walk-up) so transient DOM swaps between Flow renders don't
+    leave us bound to a detached element. Raises
+    PlaywrightTimeoutError when the composer can't be located —
+    caller maps that to a clean RecordedFlowError.
+    """
+    result = page.evaluate(_COMPOSER_ROOT_TAG_JS)
+    if not isinstance(result, dict) or result.get("error"):
+        err = result.get("error") if isinstance(result, dict) else "unknown"
+        raise PlaywrightTimeoutError(
+            f"could not locate active prompt composer root: {err}"
+        )
+    return page.locator('[data-flow-bof-composer="1"]').first
+
+
+def _count_composer_attachments(page: Page) -> int:
+    """Composer-local attachment count. Returns ONLY the number of
+    references currently attached to the active prompt composer's
+    attachment strip — not library / sidebar / gallery items.
+
+    This is the count the multi-ref per-attach assertion should use,
+    not the global page count.
+    """
+    return _locate_all_reference_thumbnails(page).count()
+
+
+def _clear_composer_attachments(
+    page: Page, logger: logging.Logger, max_attempts: int = 3,
+) -> int:
+    """Reset the composer to a clean state before starting a new
+    product. Returns the final attachment count (target: 0).
+
+    Strategy:
+      1. Click the "Clear prompt" button if present — atomic clear of
+         text + attachments. Safer than per-chip removal because the
+         chip <button> structure includes a cancel-icon ALONGSIDE the
+         thumbnail in the same button element, and clicking the chip
+         may open a card popover instead of removing.
+      2. If attachments remain, fall through and just report — we
+         don't want to start clicking individual chips and end up
+         opening Flow's media library / asset card.
+
+    If the user runs this on a fresh tab with no prior interactions,
+    "Clear prompt" may not be present (nothing to clear). That's
+    fine; the attachment count is already 0.
+    """
+    composer = _locate_active_composer(page)
+    initial = _count_composer_attachments(page)
+    if initial == 0:
+        logger.info(
+            "[FLOW_IMAGE] Composer already empty; no clear needed."
+        )
+        return 0
+
+    # Look for the "Clear prompt" button by visible text. Restrict
+    # to the composer root so we don't accidentally click a "clear"
+    # button elsewhere on the page.
+    for attempt in range(1, max_attempts + 1):
+        try:
+            clear_btn = composer.locator("button").filter(
+                has_text="Clear prompt"
+            ).first
+            if clear_btn.count() > 0:
+                clear_btn.click(timeout=3000)
+                logger.info(
+                    "[FLOW_IMAGE] Clicked 'Clear prompt' (attempt %d)",
+                    attempt,
+                )
+                # Give Flow a beat to remove the chips.
+                page.wait_for_timeout(400)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[FLOW_IMAGE] Clear prompt click attempt %d raised: %s",
+                attempt, _short_err(exc),
+            )
+        remaining = _count_composer_attachments(page)
+        if remaining == 0:
+            logger.info(
+                "[FLOW_IMAGE] Composer cleared; attachment count=0"
+            )
+            return 0
+        logger.warning(
+            "[FLOW_IMAGE] After clear attempt %d, %d attachment(s) "
+            "still in composer.", attempt, remaining,
+        )
+
+    final = _count_composer_attachments(page)
+    logger.warning(
+        "[FLOW_IMAGE] Could not fully clear composer; %d attachment(s) "
+        "remain. Continuing — per-attach delta logic will still work.",
+        final,
+    )
+    return final
 
 
 def _locate_result_images(page: Page) -> Locator:
@@ -1499,26 +1692,29 @@ def perform_recorded_flow(
     )[:3]
     n_total = len(all_image_paths)
     logger.info(
-        "Reference images to attach: %d (paths=%s)",
+        "[FLOW_IMAGE] Reference images to attach: %d (paths=%s)",
         n_total, all_image_paths,
     )
 
-    # Snapshot the number of media thumbnails currently visible on
-    # the page BEFORE we attach anything. Flow's UI may show past
-    # uploads in a sidebar/library that share the same DOM signature
-    # as composer-attached thumbnails. Without this snapshot, an
-    # absolute `to_have_count(N)` assertion expects total=N, but the
-    # real condition is "N MORE than we started with."
+    # --- Reset composer state BEFORE attaching anything ---
     #
-    # The locator selects every matching img on the page — sidebar +
-    # library + composer. After each Add to Prompt, the count grows
-    # by exactly one as the new thumbnail joins the composer.
-    initial_thumbnail_count = _locate_all_reference_thumbnails(page).count()
-    logger.info(
-        "Reference-thumbnail snapshot before attach: count=%d "
-        "(includes sidebar/library; deltas drive per-attach assertions)",
-        initial_thumbnail_count,
-    )
+    # The thumbnail count must start at 0 inside the active composer
+    # root, not at "whatever was left from the previous product."
+    # If the previous product was interrupted or the user manually
+    # tested in Flow, attachments could be sitting in the composer
+    # — clearing first guarantees the per-attach assertions
+    # (expected count = ref_idx exactly) are correct.
+    #
+    # We don't fail the whole product if clear didn't fully reset;
+    # the delta math below still works as long as the count is
+    # stable when we START. We just log + continue.
+    composer_start_count = _clear_composer_attachments(page, logger)
+    if composer_start_count != 0:
+        logger.warning(
+            "[FLOW_IMAGE] Composer not fully cleared (count=%d); "
+            "per-attach expected counts will be relative to this baseline.",
+            composer_start_count,
+        )
 
     # --- Attach each reference image in turn. Steps 1-3 are repeated
     # for each image; the prompt + submit happens once at the end.
@@ -1526,7 +1722,7 @@ def perform_recorded_flow(
     for ref_idx, ref_path in enumerate(all_image_paths, start=1):
         role_label = f"{ref_idx}/{n_total}"
         logger.info(
-            "Attaching reference %s: %s",
+            "[FLOW_IMAGE] Attaching reference %s: %s",
             role_label, ref_path,
         )
 
@@ -1535,34 +1731,27 @@ def perform_recorded_flow(
         # single hidden <input type="file"> but if it ever swaps
         # the element on us, .first picks up whichever one is live.
         _locate_file_input(page).set_input_files(ref_path)
-        logger.info("[ref %s] Uploaded image", role_label)
+        logger.info("[FLOW_IMAGE] [ref %s] Uploaded image", role_label)
 
         # --- 2. Click "+" in composer ---
         # The JS picker re-runs each call and tags the chosen
         # button with data-flow-bof-plus, so it survives DOM
         # reshuffles between iterations.
         _locate_plus_button(page).click(timeout=selector_timeout_ms)
-        logger.info("[ref %s] Clicked composer plus button", role_label)
+        logger.info(
+            "[FLOW_IMAGE] [ref %s] Clicked composer plus button",
+            role_label,
+        )
 
         # --- 3. Click "Add to Prompt"
         #
         # The "Add to Prompt" button stays `disabled` until Flow's
-        # backend finishes processing the upload from step 1. Most
-        # products clear in under a second, but every now and then
-        # (large image, slow server response, image format that
-        # needs a transcode step) Flow holds the button disabled
-        # for several seconds. The default Playwright .click()
-        # timeout is `selector_timeout_ms` (15s), which is the same
-        # value across safe/balanced/fast — when that's not enough
-        # we get a clean failure with "element is not enabled"
-        # across ~30 retries.
-        #
-        # Fix: explicitly wait for the button to become enabled
-        # with a longer budget than the click timeout, so a slow
-        # upload doesn't take the whole batch with it. We also re-
-        # locate after the wait because Flow occasionally swaps the
-        # underlying element between the disabled and enabled state,
-        # which can stale-element the locator we had a moment ago.
+        # backend finishes processing the upload from step 1. We
+        # explicitly wait for it to become enabled with a longer
+        # budget than the click timeout, so a slow upload doesn't
+        # take the whole batch with it. We re-locate after the wait
+        # because Flow occasionally swaps the underlying element
+        # between the disabled and enabled state.
         try:
             expect(_locate_add_to_prompt(page)).to_be_enabled(
                 timeout=add_to_prompt_enable_timeout_ms
@@ -1576,33 +1765,43 @@ def perform_recorded_flow(
             ) from exc
         _locate_add_to_prompt(page).click(timeout=selector_timeout_ms)
 
-        # --- 4. Verify the attach landed by DELTA against the
-        #        snapshot, not an absolute count. The sidebar /
-        #        library imgs share the selector signature; only the
-        #        delta tells us whether the composer gained a new
-        #        attachment.
-        expected_count = initial_thumbnail_count + ref_idx
+        # --- 4. Verify the attach landed using COMPOSER-LOCAL count.
+        #
+        # The count is taken inside the active composer root, so it
+        # does NOT include sidebar / library / gallery / result
+        # thumbnails. Expected count = composer_start_count + ref_idx
+        # (the start count is usually 0 after the clear above).
+        expected_count = composer_start_count + ref_idx
         try:
             expect(_locate_all_reference_thumbnails(page)).to_have_count(
                 expected_count, timeout=selector_timeout_ms
             )
         except (AssertionError, PlaywrightTimeoutError) as exc:
-            observed = _locate_all_reference_thumbnails(page).count()
+            # Capture the global count too, for triage — if it
+            # disagrees wildly with the composer-local count, the
+            # composer-root locator may have drifted to the wrong
+            # element.
+            try:
+                global_count = page.locator(
+                    'button[data-card-open] img[src*="media.getMediaUrlRedirect"]'
+                ).count()
+            except Exception:
+                global_count = -1
+            observed = _count_composer_attachments(page)
             raise RecordedFlowError(
-                f"[ref {role_label}] Expected total reference-thumbnail "
-                f"count to reach {expected_count} after Add to Prompt "
-                f"(snapshot {initial_thumbnail_count} + {ref_idx} attached), "
-                f"observed {observed}. The Add to Prompt click did not "
-                "produce a new composer attachment. Possible causes: Flow's "
-                "upload silently failed, the secondary attach path is "
-                "different from the first, or the thumbnail selector no "
-                "longer matches Flow's current DOM."
+                f"COMPOSER_ATTACHMENT_COUNT_MISMATCH "
+                f"[ref {role_label}] expected composer-local count="
+                f"{expected_count} (start={composer_start_count} + "
+                f"{ref_idx} attached), observed={observed}, "
+                f"global_count={global_count}. The Add to Prompt click did "
+                "not produce a new attachment INSIDE the active composer, "
+                "or the composer-root locator drifted. Check whether stale "
+                "composer attachments survived the clear step, or whether "
+                "Flow swapped to a different composer (e.g. video tab)."
             ) from exc
         logger.info(
-            "[ref %s] Attached reference %d/%d (total thumbnails now %d, "
-            "snapshot was %d)",
-            role_label, ref_idx, n_total,
-            expected_count, initial_thumbnail_count,
+            "[FLOW_IMAGE] Attached reference %d/%d; composer count=%d",
+            ref_idx, n_total, expected_count,
         )
 
     # --- 4. Type prompt, confirm it is visible in the composer ---
