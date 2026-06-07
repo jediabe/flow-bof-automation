@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.8-alpha"
+APP_VERSION = "0.6.9-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -292,24 +292,28 @@ def _between_products_delay(
     from .config import AUTOMATION_MODE_FAMILY_PLAN
     base_ms = settings.image_between_products_ms
     if settings.automation_mode == AUTOMATION_MODE_FAMILY_PLAN:
-        # Jitter — 0-30s on top of the 15s base (was 0-60s + 30s,
-        # tuned down per user feedback that earlier values were
-        # excessive while still wanting a meaningful spread).
-        jitter_ms = random.randint(0, 30_000)
+        # Jitter — 0-25s on top of the 5s base. Mental model:
+        # someone who's really focused and copy-pasting quickly.
+        # Range 5-30s, mean ~17s. Earlier versions of this mode
+        # were "a little excessive" per user feedback (45-90s
+        # gaps) — this keeps the human-cadence variation without
+        # the slog.
+        jitter_ms = random.randint(0, 25_000)
         total_ms = base_ms + jitter_ms
         logger.info(
             "Family-plan inter-item delay: %.1fs (base=%dms + jitter=%dms)",
             total_ms / 1000, base_ms, jitter_ms,
         )
         page.wait_for_timeout(total_ms)
-        # Every 12 items, take a 1-3 minute rest (was every 8 items,
-        # 2-5 min). Keeps the "human bursts" cadence but with less
-        # downtime per dozen items.
-        if n_completed > 0 and n_completed % 12 == 0:
-            rest_ms = random.randint(60_000, 180_000)
+        # Every 15 items, take a brief 30-60s breather. A focused
+        # human still pauses to drink water or check their phone;
+        # this keeps the burst-then-pause cadence that Google's
+        # risk model expects from real users.
+        if n_completed > 0 and n_completed % 15 == 0:
+            rest_ms = random.randint(30_000, 60_000)
             logger.info(
-                "Family-plan periodic rest: %.1fmin after %d items",
-                rest_ms / 60_000, n_completed,
+                "Family-plan periodic rest: %.0fs after %d items",
+                rest_ms / 1000, n_completed,
             )
             page.wait_for_timeout(rest_ms)
         return
