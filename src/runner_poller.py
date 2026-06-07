@@ -190,9 +190,17 @@ class RunnerPoller:
         # the SaaS uses for the /:id/events + /:id/complete routes.
         return job
 
-    def post_event(self, job_id: str, event: dict) -> None:
+    def post_event(self, job_id: str, event: dict) -> dict | None:
         """Persist one progress event. Never raises — progress is
-        informational; a missed event must not crash the loop."""
+        informational; a missed event must not crash the loop.
+
+        Returns the parsed JSON response body when the SaaS replied
+        with 200, or None on any failure / non-2xx. The body's
+        `cancelled` field carries the cooperative-cancel signal: the
+        runner's run_forever loop reads it and propagates into the
+        per-job cancel_signal dict so the image-generation handler
+        can exit between items.
+        """
         # Map the agent_api emitter's shape onto the /events body
         # the SaaS expects (it accepts both shapes; this is the
         # superset for clarity).
@@ -205,9 +213,16 @@ class RunnerPoller:
             "details":    event.get("details"),
         }
         try:
-            self._post(f"/api/runner/jobs/{job_id}/events", body)
+            resp = self._post(f"/api/runner/jobs/{job_id}/events", body)
         except httpx.HTTPError as exc:
             logger.warning("event POST failed for job %s: %s", job_id, exc)
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
 
     def complete(self, job_id: str, envelope: dict) -> None:
         body = {"envelope": envelope}
@@ -260,15 +275,35 @@ class RunnerPoller:
             job_type = job.get("job_type") or "?"
             logger.info("claimed job %s (%s)", saas_job_id, job_type)
 
+            # Per-job cancel signal. The image-generation handler
+            # reads this between items and exits cleanly when set.
+            # Mutated by _on_event below whenever the SaaS replies
+            # to a progress POST with {cancelled: true}.
+            cancel_signal: dict = {"cancelled": False}
+
             # Per-job progress callback wired to /events. The agent
             # API's emitter swallows callback exceptions, so a network
             # blip here can't kill the running job.
-            def _on_event(evt: dict, _jid: str = saas_job_id) -> None:
-                self.post_event(_jid, evt)
+            def _on_event(
+                evt: dict,
+                _jid: str = saas_job_id,
+                _sig: dict = cancel_signal,
+            ) -> None:
+                resp = self.post_event(_jid, evt)
+                if isinstance(resp, dict) and resp.get("cancelled"):
+                    if not _sig["cancelled"]:
+                        logger.info(
+                            "job %s received cooperative cancel from SaaS",
+                            _jid,
+                        )
+                    _sig["cancelled"] = True
 
             try:
                 envelope = handle_agent_job(
-                    job, logger=logger, progress_callback=_on_event,
+                    job,
+                    logger=logger,
+                    progress_callback=_on_event,
+                    cancel_signal=cancel_signal,
                 )
                 self.complete(saas_job_id, envelope)
                 status = envelope.get("status")

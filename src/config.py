@@ -134,18 +134,18 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
     """Per-mode timing defaults. Individual env vars override these."""
     if mode == AUTOMATION_MODE_FAMILY_PLAN:
         # Family-plan accounts ship with stricter abuse heuristics on
-        # Flow's side. Every gap here is deliberately at least 5x what
+        # Flow's side. Every gap here is deliberately well above what
         # "balanced" uses so the request velocity profile looks more
         # like a human at the keyboard than batch automation. The
         # actual jittered delay is applied in the loop via
-        # random.randint(0, ms) — these values are the FLOOR.
+        # _between_products_delay() — these values are the FLOOR.
         return dict(
-            image_between_products_ms=30_000,   # 30s base + jitter
-            image_ui_settle_ms=800,
-            video_tile_settle_ms=1_200,
-            video_after_hover_ms=1_000,
-            video_after_menu_click_ms=800,
-            video_between_products_ms=20_000,   # 20s base + jitter
+            image_between_products_ms=15_000,   # 15s base + 0-30s jitter
+            image_ui_settle_ms=500,
+            video_tile_settle_ms=900,
+            video_after_hover_ms=700,
+            video_after_menu_click_ms=600,
+            video_between_products_ms=12_000,   # 12s base + jitter
             video_retry_count=3,
         )
     if mode == AUTOMATION_MODE_BALANCED:

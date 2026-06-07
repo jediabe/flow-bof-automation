@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.7-alpha"
+APP_VERSION = "0.6.8-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -292,19 +292,21 @@ def _between_products_delay(
     from .config import AUTOMATION_MODE_FAMILY_PLAN
     base_ms = settings.image_between_products_ms
     if settings.automation_mode == AUTOMATION_MODE_FAMILY_PLAN:
-        # Wide jitter — between 0 and 60s on top of the 30s base.
-        jitter_ms = random.randint(0, 60_000)
+        # Jitter — 0-30s on top of the 15s base (was 0-60s + 30s,
+        # tuned down per user feedback that earlier values were
+        # excessive while still wanting a meaningful spread).
+        jitter_ms = random.randint(0, 30_000)
         total_ms = base_ms + jitter_ms
         logger.info(
             "Family-plan inter-item delay: %.1fs (base=%dms + jitter=%dms)",
             total_ms / 1000, base_ms, jitter_ms,
         )
         page.wait_for_timeout(total_ms)
-        # Every 8 items, additionally take a 2-5 minute rest. Aligns
-        # the session's request-velocity profile with a human who
-        # gets a coffee or checks their phone between bursts.
-        if n_completed > 0 and n_completed % 8 == 0:
-            rest_ms = random.randint(120_000, 300_000)
+        # Every 12 items, take a 1-3 minute rest (was every 8 items,
+        # 2-5 min). Keeps the "human bursts" cadence but with less
+        # downtime per dozen items.
+        if n_completed > 0 and n_completed % 12 == 0:
+            rest_ms = random.randint(60_000, 180_000)
             logger.info(
                 "Family-plan periodic rest: %.1fmin after %d items",
                 rest_ms / 60_000, n_completed,
@@ -1822,8 +1824,30 @@ def _handle_generate_flow_images(
             # item finishes (or fails) cleanly without partial state.
             flow_risk_code: str | None = None
             flow_risk_after_item: int = 0
+            # Cooperative-cancel state. Set when the runner_poller
+            # detects {cancelled: true} on an /events response and
+            # mutates the shared cancel_signal dict (stashed on the
+            # job under __cancel_signal). Same break-out pattern as
+            # the risk-engine: finish the current item, then exit.
+            cancel_signal = job.get("__cancel_signal") or {}
+            cancelled_after_item: int = 0
+            cancelled = False
 
             for n, item in enumerate(valid_items, start=1):
+                # Cooperative cancel — checked AT THE TOP of every
+                # iteration so the SaaS-side Stop button takes effect
+                # within one item. The runner can't safely interrupt
+                # a Playwright action mid-flight; this is the next
+                # best thing.
+                if cancel_signal.get("cancelled"):
+                    logger.warning(
+                        "Cooperative cancel received from SaaS before "
+                        "item %d/%d. Exiting loop cleanly.",
+                        n, len(valid_items),
+                    )
+                    cancelled = True
+                    cancelled_after_item = n - 1
+                    break
                 # Google Flow's anti-abuse risk engine occasionally
                 # flags our session and starts rejecting submits with
                 # "We noticed some unusual activity" / "Too many
@@ -2070,6 +2094,48 @@ def _handle_generate_flow_images(
     # specific failure code so the SaaS can surface a cooldown banner
     # to the user instead of treating the batch as a normal partial
     # success.
+    # Cooperative cancel — checked BEFORE flow_risk so a kill-switch
+    # press during a risk-engine-triggered batch still reports
+    # "cancelled" (user intent wins over rate-limit framing).
+    if cancelled:
+        emit(
+            "cancelled",
+            f"Cancelled by SaaS. Stopped after {submitted} successful "
+            f"submit(s); {len(valid_items) - cancelled_after_item} item(s) "
+            f"unsubmitted.",
+            details={
+                "code":                "USER_CANCELLED",
+                "stopped_after_item":  cancelled_after_item,
+                "submitted":           submitted,
+                "failed":              failed,
+                "unsubmitted":         len(valid_items) - cancelled_after_item,
+                "elapsed_seconds":     elapsed,
+            },
+        )
+        # Report as a failure envelope so the runner's /complete
+        # call carries the partial result + error code. The SaaS
+        # /complete handler preserves the job's "cancelled" status
+        # (set by cancelBatchJobs) rather than overwriting it from
+        # this envelope, so the audit trail shows the user's
+        # explicit stop intent.
+        return _failure(
+            job,
+            "USER_CANCELLED",
+            f"Stopped by the SaaS-side kill switch after item "
+            f"{cancelled_after_item}. {submitted} item(s) submitted "
+            f"successfully before the cancel landed; "
+            f"{len(valid_items) - cancelled_after_item} item(s) "
+            f"unsubmitted.",
+            details={
+                "stopped_after_item":  cancelled_after_item,
+                "submitted":           submitted,
+                "failed":              failed,
+                "unsubmitted":         len(valid_items) - cancelled_after_item,
+                "items":               items_out,
+                "elapsed_seconds":     elapsed,
+            },
+        )
+
     if flow_risk_code:
         emit(
             "rate_limited",
@@ -2144,6 +2210,7 @@ def handle_agent_job(
     job: dict,
     logger: logging.Logger | None = None,
     progress_callback: Optional[ProgressCallback] = None,
+    cancel_signal: Optional[dict] = None,
 ) -> dict:
     """Dispatch a job envelope to the right handler. Never raises.
 
@@ -2158,6 +2225,15 @@ def handle_agent_job(
     accept and ignore it. Short jobs (health_check etc.) emit nothing.
     Long jobs (generate_flow_videos_from_favorites) emit events per
     the schema in ``docs/JOB_PROTOCOL.md``.
+
+    ``cancel_signal`` is an optional mutable dict the runner uses to
+    propagate "stop now" from the SaaS. The runner_poller sets
+    ``cancel_signal["cancelled"]=True`` when an /events POST comes
+    back with ``cancelled: true`` (which the SaaS sets via the
+    cancelBatchJobs server action). Handlers that support
+    cooperative cancel read it between iterations and exit cleanly.
+    Passed through to handlers as a synthetic ``__cancel_signal`` key
+    on the job dict so handler signatures don't have to change.
 
     Unknown job_type values return a ``UNKNOWN_JOB_TYPE`` failure
     rather than raising, again so the caller never has to wrap this in
@@ -2184,6 +2260,13 @@ def handle_agent_job(
             f"No handler for job_type={job_type!r}. "
             f"Known types: {known_job_types()}",
         )
+
+    # Stash the cancel_signal on the job dict so the handler that
+    # cares can read it without changing its signature. Handlers that
+    # don't care simply ignore the extra key.
+    if cancel_signal is not None:
+        job = dict(job)
+        job["__cancel_signal"] = cancel_signal
 
     try:
         return handler(job, logger, progress_callback)
