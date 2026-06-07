@@ -117,11 +117,37 @@ DEFAULT_BLANKET_VIDEO_PROMPT = (
 AUTOMATION_MODE_SAFE = "safe"
 AUTOMATION_MODE_BALANCED = "balanced"
 AUTOMATION_MODE_FAST = "fast"
-VALID_AUTOMATION_MODES = {AUTOMATION_MODE_BALANCED, AUTOMATION_MODE_FAST}
+# Stricter mode introduced for Google Family Plan accounts, which have
+# aggressive anti-abuse heuristics on Flow. Adds ~30-90s randomised
+# inter-item delays and a longer post-prompt-typing settle. Use this
+# mode when the SaaS keeps reporting FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY
+# on otherwise healthy automation runs.
+AUTOMATION_MODE_FAMILY_PLAN = "family_plan"
+VALID_AUTOMATION_MODES = {
+    AUTOMATION_MODE_BALANCED,
+    AUTOMATION_MODE_FAST,
+    AUTOMATION_MODE_FAMILY_PLAN,
+}
 
 
 def _automation_mode_defaults(mode: str) -> dict[str, int]:
     """Per-mode timing defaults. Individual env vars override these."""
+    if mode == AUTOMATION_MODE_FAMILY_PLAN:
+        # Family-plan accounts ship with stricter abuse heuristics on
+        # Flow's side. Every gap here is deliberately at least 5x what
+        # "balanced" uses so the request velocity profile looks more
+        # like a human at the keyboard than batch automation. The
+        # actual jittered delay is applied in the loop via
+        # random.randint(0, ms) — these values are the FLOOR.
+        return dict(
+            image_between_products_ms=30_000,   # 30s base + jitter
+            image_ui_settle_ms=800,
+            video_tile_settle_ms=1_200,
+            video_after_hover_ms=1_000,
+            video_after_menu_click_ms=800,
+            video_between_products_ms=20_000,   # 20s base + jitter
+            video_retry_count=3,
+        )
     if mode == AUTOMATION_MODE_BALANCED:
         return dict(
             image_between_products_ms=200,

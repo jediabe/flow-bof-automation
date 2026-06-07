@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.6-alpha"
+APP_VERSION = "0.6.7-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +269,50 @@ def _find_existing_flow_page(session, settings):
         if actual == target_netloc:
             return page
     return None
+
+
+# Anti-block helper for the image-generation loop. The previous
+# uniform `wait_for_timeout(base_ms + 0-2000ms)` pattern was fine for
+# personal accounts but produced a too-regular request-velocity
+# profile on Google Family Plan accounts, which trip "unusual
+# activity" blocks at much lower thresholds. This helper:
+#
+#   - In family_plan mode, scales the jitter up to ~30s so the gap
+#     between products varies wildly (looks more like a human at the
+#     keyboard).
+#   - In family_plan mode, adds a 2-5min "rest period" every 8 items
+#     so the session has the kind of natural pauses Google's risk
+#     model expects between bursts of activity.
+#   - In other modes, keeps the prior behaviour byte-for-byte.
+def _between_products_delay(
+    page, settings, n_completed: int, logger,
+) -> None:
+    """Inter-item delay. Called after every product in the image
+    generation loop (success + failure paths)."""
+    from .config import AUTOMATION_MODE_FAMILY_PLAN
+    base_ms = settings.image_between_products_ms
+    if settings.automation_mode == AUTOMATION_MODE_FAMILY_PLAN:
+        # Wide jitter — between 0 and 60s on top of the 30s base.
+        jitter_ms = random.randint(0, 60_000)
+        total_ms = base_ms + jitter_ms
+        logger.info(
+            "Family-plan inter-item delay: %.1fs (base=%dms + jitter=%dms)",
+            total_ms / 1000, base_ms, jitter_ms,
+        )
+        page.wait_for_timeout(total_ms)
+        # Every 8 items, additionally take a 2-5 minute rest. Aligns
+        # the session's request-velocity profile with a human who
+        # gets a coffee or checks their phone between bursts.
+        if n_completed > 0 and n_completed % 8 == 0:
+            rest_ms = random.randint(120_000, 300_000)
+            logger.info(
+                "Family-plan periodic rest: %.1fmin after %d items",
+                rest_ms / 60_000, n_completed,
+            )
+            page.wait_for_timeout(rest_ms)
+        return
+    # Existing behaviour for balanced / fast.
+    page.wait_for_timeout(base_ms + random.randint(0, 2000))
 
 
 def _tile_to_item(tile) -> dict:
@@ -1904,7 +1948,7 @@ def _handle_generate_flow_images(
                             },
                         },
                     )
-                    page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
+                    _between_products_delay(page, settings, n, logger)
                     continue
                 except FlowAutomationError as exc:
                     failed += 1
@@ -1938,7 +1982,7 @@ def _handle_generate_flow_images(
                             },
                         },
                     )
-                    page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
+                    _between_products_delay(page, settings, n, logger)
                     continue
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
@@ -1972,7 +2016,7 @@ def _handle_generate_flow_images(
                             },
                         },
                     )
-                    page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
+                    _between_products_delay(page, settings, n, logger)
                     continue
 
                 # Success path. tiles is the list of newly captured
@@ -2000,7 +2044,7 @@ def _handle_generate_flow_images(
                         "media_id":     captured_media_id,
                     },
                 )
-                page.wait_for_timeout(settings.image_between_products_ms + random.randint(0, 2000))
+                _between_products_delay(page, settings, n, logger)
 
     except FlowAutomationError as exc:
         msg = str(exc)

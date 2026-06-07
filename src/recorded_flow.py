@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -994,6 +995,94 @@ def _short_err(exc: Exception) -> str:
     return msg[:120]
 
 
+# Anti-fingerprint helper used in the image-generation hot path. The
+# previous code called locator.click() directly, which synthesises a
+# point-event at the element's center and dispatches it instantly —
+# a near-perfect bot tell. _human_click() instead:
+#
+#   1. Reads the element's bounding box.
+#   2. Picks a randomised coordinate INSIDE the box (avoids the
+#      exact center; clamps to a margin so the click can't fall on
+#      a sub-pixel edge).
+#   3. Moves the mouse there with `steps=N` so the browser dispatches
+#      a stream of mousemove events along the path (Google's
+#      anti-abuse heuristics look at mouse trajectory).
+#   4. Clicks.
+#
+# When `bounding_box()` fails (the element is offscreen or the
+# locator returned 0 elements), falls back to a normal `.click()` so
+# the call site doesn't have to handle two error paths. The fallback
+# is a quiet log line at debug level.
+def _human_click(
+    page: Page,
+    locator: Locator,
+    *,
+    timeout: int = 15_000,
+    log: logging.Logger | None = None,
+    margin_ratio: float = 0.2,
+    steps_range: tuple[int, int] = (15, 30),
+    settle_ms_range: tuple[int, int] = (60, 220),
+) -> None:
+    """Move the mouse to a randomised coord inside `locator` then click.
+
+    Args:
+        timeout: passed through to bounding_box() AND the final click.
+        margin_ratio: avoid the outer N% of the element on each axis
+            so the click target stays well inside. 0.2 = pick from
+            the central 60% of width/height.
+        steps_range: (min, max) for `page.mouse.move(steps=...)`. More
+            steps = more granular mousemove events. Google's risk
+            model looks for movement, not snap-clicks.
+        settle_ms_range: brief randomised settle between move and
+            click — humans don't move-and-click on the same frame.
+    """
+    log = log or logging.getLogger("flow_bof")
+    try:
+        # Make sure the element is in DOM + visible before we ask for
+        # geometry. This also gives Playwright a chance to scroll it
+        # into view.
+        locator.wait_for(state="visible", timeout=timeout)
+        box = locator.bounding_box(timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("_human_click: bounding_box failed (%s); using plain click.", _short_err(exc))
+        locator.click(timeout=timeout)
+        return
+    if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+        log.debug("_human_click: empty box (%s); using plain click.", box)
+        locator.click(timeout=timeout)
+        return
+
+    w = box["width"]
+    h = box["height"]
+    mx_min = box["x"] + margin_ratio * w
+    mx_max = box["x"] + (1.0 - margin_ratio) * w
+    my_min = box["y"] + margin_ratio * h
+    my_max = box["y"] + (1.0 - margin_ratio) * h
+    # Defensive: if the element is tiny, the margin can leave no
+    # range. Clamp to the full box width/height in that case.
+    if mx_max <= mx_min:
+        mx_min = box["x"]
+        mx_max = box["x"] + w
+    if my_max <= my_min:
+        my_min = box["y"]
+        my_max = box["y"] + h
+
+    target_x = random.uniform(mx_min, mx_max)
+    target_y = random.uniform(my_min, my_max)
+    steps = random.randint(*steps_range)
+
+    try:
+        page.mouse.move(target_x, target_y, steps=steps)
+        page.wait_for_timeout(random.randint(*settle_ms_range))
+        page.mouse.click(target_x, target_y)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(
+            "_human_click: mouse-path click failed (%s); falling back to locator.click().",
+            _short_err(exc),
+        )
+        locator.click(timeout=timeout)
+
+
 def _locate_prompt_input(page: Page) -> Locator:
     # Recorded: input events fired on a contenteditable div at (698, 881)
     # with role="textbox" and contenteditable="true". Scoped to the
@@ -1737,7 +1826,15 @@ def perform_recorded_flow(
         # The JS picker re-runs each call and tags the chosen
         # button with data-flow-bof-plus, so it survives DOM
         # reshuffles between iterations.
-        _locate_plus_button(page).click(timeout=selector_timeout_ms)
+        # Humanised click: random coord inside the button + mouse
+        # glide. Reduces the snap-click fingerprint Google's risk
+        # model picks up on stricter accounts (family plan).
+        _human_click(
+            page,
+            _locate_plus_button(page),
+            timeout=selector_timeout_ms,
+            log=logger,
+        )
         logger.info(
             "[FLOW_IMAGE] [ref %s] Clicked composer plus button",
             role_label,
@@ -1763,7 +1860,12 @@ def perform_recorded_flow(
                 "is probably still processing the uploaded image, or the "
                 "upload itself failed. Try the row again."
             ) from exc
-        _locate_add_to_prompt(page).click(timeout=selector_timeout_ms)
+        _human_click(
+            page,
+            _locate_add_to_prompt(page),
+            timeout=selector_timeout_ms,
+            log=logger,
+        )
 
         # --- 4. Verify the attach landed using COMPOSER-LOCAL count.
         #
@@ -1848,7 +1950,7 @@ def perform_recorded_flow(
     except (AssertionError, PlaywrightTimeoutError) as exc:
         raise RecordedFlowError("Generate arrow is not enabled.") from exc
 
-    arrow.click()
+    _human_click(page, arrow, timeout=selector_timeout_ms, log=logger)
     logger.info("Generate clicked")
 
     if verify_generation_started:

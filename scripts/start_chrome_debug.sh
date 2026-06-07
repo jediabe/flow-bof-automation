@@ -3,7 +3,7 @@
 # The Docker container reaches this Chrome via cdp-proxy:9333, which
 # forwards to host.docker.internal:9222 (i.e. this Chrome).
 #
-# Three flags matter, all required:
+# Three CDP flags matter, all required:
 #   --remote-debugging-port=9222
 #       Opens the DevTools HTTP/WS endpoint.
 #   --remote-debugging-address=0.0.0.0
@@ -16,6 +16,14 @@
 #       and rejects with 403 unless the requesting Origin is allow-listed.
 #       Setting * is the simplest workaround -- only safe because port
 #       9222 isn't exposed beyond the host's docker network in our setup.
+#
+# Plus one anti-fingerprint flag for family-plan accounts:
+#   --disable-blink-features=AutomationControlled
+#       Quiets the "this is an automated browser" signal Blink sets
+#       when CDP is enabled. Family-plan accounts have stricter
+#       heuristics; this is one cheap fingerprint to suppress. Doesn't
+#       make automation invisible (network velocity + click patterns
+#       still tell the story) but removes an easy tell.
 #
 # CRITICAL: close every existing Chrome window before running this.
 # macOS will hand a fresh launch off to an existing Chrome process,
@@ -62,6 +70,7 @@ echo "Launching Chrome with:"
 echo "  --remote-debugging-port=${PORT}"
 echo "  --remote-debugging-address=0.0.0.0"
 echo "  --remote-allow-origins=*"
+echo "  --disable-blink-features=AutomationControlled"
 echo "  --user-data-dir=${USER_DATA_DIR}"
 
 # nohup + & detaches from this shell so start.sh can continue.
@@ -69,6 +78,7 @@ nohup "${CHROME_APP}" \
     --remote-debugging-port="${PORT}" \
     --remote-debugging-address=0.0.0.0 \
     --remote-allow-origins='*' \
+    --disable-blink-features=AutomationControlled \
     --user-data-dir="${USER_DATA_DIR}" \
     >/dev/null 2>&1 &
 
