@@ -17,13 +17,15 @@
 #       Setting * is the simplest workaround -- only safe because port
 #       9222 isn't exposed beyond the host's docker network in our setup.
 #
-# Plus one anti-fingerprint flag for family-plan accounts:
-#   --disable-blink-features=AutomationControlled
-#       Quiets the "this is an automated browser" signal Blink sets
-#       when CDP is enabled. Family-plan accounts have stricter
-#       heuristics; this is one cheap fingerprint to suppress. Doesn't
-#       make automation invisible (network velocity + click patterns
-#       still tell the story) but removes an easy tell.
+# Anti-fingerprint (navigator.webdriver suppression) used to live
+# here as `--disable-blink-features=AutomationControlled`. We removed
+# it because Chrome shows a yellow "you are using an unsupported
+# command-line flag" infobar whenever that flag is set — itself a
+# visible signal that the browser is automated, and likely
+# something Google's risk engine can detect. The same fingerprint
+# suppression now happens INSIDE the runner via a CDP init script
+# (see flow_automation.py:_STEALTH_INIT_JS) so users get the
+# benefit without the banner.
 #
 # CRITICAL: close every existing Chrome window before running this.
 # macOS will hand a fresh launch off to an existing Chrome process,
@@ -70,7 +72,6 @@ echo "Launching Chrome with:"
 echo "  --remote-debugging-port=${PORT}"
 echo "  --remote-debugging-address=0.0.0.0"
 echo "  --remote-allow-origins=*"
-echo "  --disable-blink-features=AutomationControlled"
 echo "  --user-data-dir=${USER_DATA_DIR}"
 
 # nohup + & detaches from this shell so start.sh can continue.
@@ -78,7 +79,6 @@ nohup "${CHROME_APP}" \
     --remote-debugging-port="${PORT}" \
     --remote-debugging-address=0.0.0.0 \
     --remote-allow-origins='*' \
-    --disable-blink-features=AutomationControlled \
     --user-data-dir="${USER_DATA_DIR}" \
     >/dev/null 2>&1 &
 

@@ -18,16 +18,15 @@
 #       workaround -- only safe because port 9222 isn't exposed beyond
 #       the host's docker network in our setup.
 #
-# Plus one anti-fingerprint flag for family-plan accounts:
-#   --disable-blink-features=AutomationControlled
-#       When Chrome is launched with CDP enabled, Blink sets the
-#       `Sec-CH-UA` client-hint and other window properties to signal
-#       "this is an automated browser." Family-plan accounts have
-#       stricter heuristics on Google's side and the AutomationControlled
-#       hint is one of the cheap signals they consult. Disabling it
-#       doesn't make automation invisible (network velocity, click
-#       patterns, etc. still tell the story) but it quietens one of
-#       the easiest tells.
+# Anti-fingerprint (navigator.webdriver suppression) used to live
+# here as `--disable-blink-features=AutomationControlled`. We removed
+# it because Chrome shows a yellow "you are using an unsupported
+# command-line flag" infobar whenever that flag is set — itself a
+# visible signal that the browser is automated, and likely something
+# Google's risk engine can detect. The same fingerprint suppression
+# now happens INSIDE the runner via a CDP init script (see
+# flow_automation.py:_STEALTH_INIT_JS) so users get the benefit
+# without the banner.
 #
 # CRITICAL: close every existing Chrome window before running this.
 # If any Chrome process is alive, Windows will hand the new launch off
@@ -74,7 +73,6 @@ Write-Host "Launching Chrome with:"                                    -Foregrou
 Write-Host "  --remote-debugging-port=$Port"                           -ForegroundColor Cyan
 Write-Host "  --remote-debugging-address=0.0.0.0"                      -ForegroundColor Cyan
 Write-Host "  --remote-allow-origins=*"                                -ForegroundColor Cyan
-Write-Host "  --disable-blink-features=AutomationControlled"           -ForegroundColor Cyan
 Write-Host "  --user-data-dir=$UserDataDir"                            -ForegroundColor Cyan
 Write-Host ""
 Write-Host "First-time setup in the new Chrome window:" -ForegroundColor Yellow
@@ -91,7 +89,6 @@ Start-Process -FilePath $ChromePath -ArgumentList @(
     "--remote-debugging-port=$Port",
     "--remote-debugging-address=0.0.0.0",
     "--remote-allow-origins=*",
-    "--disable-blink-features=AutomationControlled",
     "--user-data-dir=`"$UserDataDir`""
 )
 

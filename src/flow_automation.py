@@ -113,13 +113,79 @@ def _attach_remote_chrome(
         # Headless real-Chrome edge case: no default context. Create one.
         context = browser.new_context()
 
+    # Anti-fingerprint: suppress navigator.webdriver via CDP rather
+    # than via the Chrome launch flag --disable-blink-features=
+    # AutomationControlled. The launch-flag approach works but
+    # triggers Chrome's yellow "unsupported command-line flag"
+    # infobar, which is itself a visible signal that the browser is
+    # automated. Doing the patch inside the page via init script
+    # achieves the same fingerprint suppression with no banner.
+    #
+    # Two-step apply:
+    #   1. context.add_init_script — runs before every future page
+    #      load in this context.
+    #   2. Evaluate on already-open pages — the Flow tab the user
+    #      has open at connection time pre-dates the init script
+    #      registration, so we have to patch it directly.
+    try:
+        context.add_init_script(_STEALTH_INIT_JS)
+    except Exception as exc:  # noqa: BLE001
+        # add_init_script can't fail at the JS level (it's just a
+        # CDP registration), but be defensive — never crash the
+        # connect over a stealth patch.
+        logger.warning("stealth init-script registration failed: %s", exc)
+    for existing_page in context.pages:
+        try:
+            existing_page.evaluate(_STEALTH_INIT_JS)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "stealth patch on existing page failed (continuing): %s", exc,
+            )
+
     logger.info(
-        "Attached to Chrome %s — %d existing context(s), %d page(s)",
+        "Attached to Chrome %s — %d existing context(s), %d page(s); "
+        "stealth init script registered",
         browser.version,
         len(browser.contexts),
         len(context.pages),
     )
     return FlowSession(context=context, is_attached=True, browser=browser)
+
+
+# JavaScript that runs in every page (via context.add_init_script for
+# future loads, and via page.evaluate for already-open tabs) to
+# suppress the most basic automation fingerprints Google's risk
+# engine looks at. Kept minimal — patching too much creates its own
+# fingerprint (the patches themselves can be detected via property
+# descriptors, getter source code, etc.).
+#
+# What this patches:
+#   - navigator.webdriver: undefined (was `true` because Chrome is
+#     running with --remote-debugging-port enabled).
+#
+# What this does NOT patch (deliberately):
+#   - navigator.plugins / .languages: already populated correctly on
+#     a real Chrome with a real user profile.
+#   - chrome.runtime: present on a real Chrome.
+#   - User-Agent: real, not spoofed.
+#   - WebGL / Canvas: real GPU, real driver.
+# These were the big differences when the launcher used Playwright's
+# own bundled Chromium. We don't have that problem because we connect
+# to the user's actual installed Chrome.
+_STEALTH_INIT_JS = r"""
+(() => {
+  // Use Object.defineProperty so the property is non-configurable
+  // and any 'in' / 'hasOwnProperty' check still reports it exists,
+  // just with the value undefined. Plain delete navigator.webdriver
+  // would leave it absent, which is itself unusual.
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+  } catch (_e) { /* swallow — better to fail open than crash */ }
+})();
+"""
 
 
 def _launch_persistent_profile(pw: Playwright, settings: Settings) -> FlowSession:
