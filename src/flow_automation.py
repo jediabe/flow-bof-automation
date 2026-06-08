@@ -159,9 +159,17 @@ def _attach_remote_chrome(
 # fingerprint (the patches themselves can be detected via property
 # descriptors, getter source code, etc.).
 #
-# What this patches:
-#   - navigator.webdriver: undefined (was `true` because Chrome is
-#     running with --remote-debugging-port enabled).
+# Approach: only patch when navigator.webdriver is TRUE (i.e. Chrome
+# was launched with --enable-automation or similar). Set it to FALSE
+# (not undefined!) because false is what a real user's Chrome
+# reports. Setting to undefined is detectable as "someone patched
+# this" because real Chrome never has undefined here.
+#
+# In our typical setup — user launches Chrome via the
+# start_chrome_debug script which only sets --remote-debugging-port
+# — webdriver is ALREADY false. The patch is then a no-op. We keep
+# the code in place defensively for users who might have Chrome
+# already running with --enable-automation from some other tool.
 #
 # What this does NOT patch (deliberately):
 #   - navigator.plugins / .languages: already populated correctly on
@@ -174,15 +182,19 @@ def _attach_remote_chrome(
 # to the user's actual installed Chrome.
 _STEALTH_INIT_JS = r"""
 (() => {
-  // Use Object.defineProperty so the property is non-configurable
-  // and any 'in' / 'hasOwnProperty' check still reports it exists,
-  // just with the value undefined. Plain delete navigator.webdriver
-  // would leave it absent, which is itself unusual.
+  // Conditional patch: only override webdriver when it's set to
+  // true. The natural value on a real user's Chrome is false; if
+  // it's already false (typical for our setup since we don't pass
+  // --enable-automation when launching Chrome), don't touch it —
+  // overriding false with anything makes things MORE detectable,
+  // not less.
   try {
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-      configurable: true,
-    });
+    if (navigator.webdriver === true) {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+        configurable: true,
+      });
+    }
   } catch (_e) { /* swallow — better to fail open than crash */ }
 })();
 """
