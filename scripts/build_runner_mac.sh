@@ -44,6 +44,9 @@ VENV_PYINST="$VENV_DIR/bin/pyinstaller"
 DIST_DIR="$REPO_ROOT/dist"
 APP_PATH="$DIST_DIR/FlowBOFRunner.app"
 COMMAND_PATH="$DIST_DIR/Flow BOF Runner.command"
+# Companion launcher the user runs ONCE to start Chrome with the
+# remote-debugging port the runner needs. Bundled into the dmg.
+START_CHROME_PATH="$DIST_DIR/Start Chrome (debug).command"
 DMG_PATH="$DIST_DIR/FlowBOFRunner-mac-alpha.dmg"
 
 echo
@@ -220,11 +223,90 @@ EOF
 chmod +x "$COMMAND_PATH"
 
 # ---------------------------------------------------------------------
+# 4b. Chrome-launch wrapper
+# ---------------------------------------------------------------------
+# The runner needs Chrome running with --remote-debugging-port=9222
+# before it can connect. End users get this dmg/exe but they don't
+# get the developer scripts in the repo — without bundling a Chrome
+# launcher into the distribution, they'd have to add Chrome flags
+# manually (most won't). Bundle the same launcher we use during dev
+# so a tester gets a "Start Chrome (debug).command" file alongside
+# the .app and just double-clicks it.
+#
+# This file IS a renamed copy of scripts/start_chrome_debug.sh — we
+# regenerate it here (rather than just cp'ing the file) so a future
+# change to the source script doesn't accidentally miss the dmg.
+echo "Writing Chrome debug launcher..."
+cat > "$START_CHROME_PATH" <<'EOF'
+#!/usr/bin/env bash
+# Launch Google Chrome with the remote-debugging port the Flow BOF
+# Runner needs. Double-click this file to start Chrome; then run
+# the Flow BOF Runner. Both need to be running together.
+#
+# The runner suppresses navigator.webdriver via a CDP init script
+# AFTER it connects, so we don't need any Chrome launch flag that
+# would trigger Chrome's "unsupported command-line flag" infobar.
+set -euo pipefail
+
+CHROME_APP="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+USER_DATA_DIR="${HOME}/chrome-flow-automation"
+PORT=9222
+
+if [[ ! -x "${CHROME_APP}" ]]; then
+    echo "[FAIL] Google Chrome not found at /Applications/Google Chrome.app" >&2
+    echo "       Install it from https://www.google.com/chrome/ and re-run." >&2
+    read -n 1 -s -r -p "Press any key to close."
+    exit 1
+fi
+
+if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+    cat >&2 <<'WARN'
+
+=========================== WARNING ===========================
+ Chrome is already running. macOS will hand this launch off to
+ the existing Chrome and SILENTLY IGNORE the new flags.
+
+ Quit Chrome entirely (Cmd+Q in the menu bar) and re-run this
+ file.
+===============================================================
+
+WARN
+    read -n 1 -s -r -p "Press any key to close."
+    exit 1
+fi
+
+mkdir -p "${USER_DATA_DIR}"
+
+echo "Launching Chrome with:"
+echo "  --remote-debugging-port=${PORT}"
+echo "  --remote-debugging-address=0.0.0.0"
+echo "  --remote-allow-origins=*"
+echo "  --user-data-dir=${USER_DATA_DIR}"
+
+nohup "${CHROME_APP}" \
+    --remote-debugging-port="${PORT}" \
+    --remote-debugging-address=0.0.0.0 \
+    --remote-allow-origins='*' \
+    --user-data-dir="${USER_DATA_DIR}" \
+    >/dev/null 2>&1 &
+
+sleep 1
+
+echo ""
+echo "Chrome started."
+echo "If this is your first run, sign in to your Google account in"
+echo "the new Chrome window and open https://labs.google/flow."
+echo ""
+echo "Then launch 'Flow BOF Runner.command' in the same folder."
+EOF
+chmod +x "$START_CHROME_PATH"
+
+# ---------------------------------------------------------------------
 # 5. DMG
 # ---------------------------------------------------------------------
 # Build a UDZO-compressed disk image containing the .app + the
-# .command wrapper. The user mounts it, drags the .app to
-# /Applications, optionally drags the .command file to the desktop
+# .command wrappers. The user mounts it, drags the .app to
+# /Applications, optionally drags the .command files to the desktop
 # (or always launches from inside the mounted dmg).
 if command -v hdiutil >/dev/null 2>&1; then
   echo "Building DMG with hdiutil..."
@@ -235,6 +317,7 @@ if command -v hdiutil >/dev/null 2>&1; then
   trap 'rm -rf "$STAGE_DIR"' EXIT
   cp -R "$APP_PATH" "$STAGE_DIR/"
   cp "$COMMAND_PATH" "$STAGE_DIR/"
+  cp "$START_CHROME_PATH" "$STAGE_DIR/"
 
   # -ov overwrites any existing dmg. UDZO is the standard read-only
   # compressed format Finder mounts natively.
@@ -264,6 +347,7 @@ if [[ -f "$DMG_PATH" ]]; then
   echo "  dmg  : $DMG_PATH  ($DMG_SIZE)"
 fi
 echo "  run  : $COMMAND_PATH"
+echo "  chrome: $START_CHROME_PATH"
 echo
 echo " The .app is UNSIGNED. First-launch on a tester's Mac will"
 echo " trigger Gatekeeper:"

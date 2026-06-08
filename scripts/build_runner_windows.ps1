@@ -280,7 +280,81 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 5. Report.
+# 5. Companion Chrome-debug launcher.
+#
+# End users get FlowBOFRunner.exe but not the developer scripts in
+# the repo. Without bundling a Chrome launcher into the
+# distribution, they'd have to add --remote-debugging-port=9222 to
+# their Chrome shortcut manually (most won't). Drop a "Start Chrome
+# (debug).ps1" next to the .exe so a tester sees both files
+# together and can right-click → "Run with PowerShell" to start
+# Chrome before launching the runner.
+#
+# This file IS a copy of scripts/start_chrome_debug.ps1 — written
+# inline here so a future change to the source script doesn't
+# accidentally miss the bundle.
+$StartChromePath = Join-Path $RepoRoot "dist\Start Chrome (debug).ps1"
+Write-Host "Writing Chrome debug launcher next to exe..." -ForegroundColor Cyan
+$ChromeLauncherContent = @'
+# Launch Google Chrome with the remote-debugging port the Flow BOF
+# Runner needs. Right-click this file -> Run with PowerShell.
+# Then launch FlowBOFRunner.exe in the same folder.
+#
+# The runner suppresses navigator.webdriver via a CDP init script
+# AFTER it connects, so we don't need any Chrome launch flag that
+# would trigger Chrome's "unsupported command-line flag" infobar.
+$ErrorActionPreference = "Stop"
+
+$ChromePath  = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+$UserDataDir = Join-Path $env:USERPROFILE "chrome-flow-automation"
+$Port        = 9222
+
+if (-not (Test-Path $ChromePath)) {
+    Write-Host "Chrome not found at $ChromePath" -ForegroundColor Red
+    Write-Host "Edit this script if Chrome lives elsewhere on your machine." -ForegroundColor Yellow
+    Read-Host "Press Enter to close"
+    exit 1
+}
+
+$existing = Get-Process -Name chrome -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host ""
+    Write-Host "=========================== WARNING ===========================" -ForegroundColor Red
+    Write-Host " Chrome is already running. Windows will hand this launch off" -ForegroundColor Red
+    Write-Host " to the existing Chrome and SILENTLY IGNORE the new flags."  -ForegroundColor Red
+    Write-Host ""
+    Write-Host " Close ALL Chrome windows, then re-run this script." -ForegroundColor Yellow
+    Write-Host "===============================================================" -ForegroundColor Red
+    Write-Host ""
+    $reply = Read-Host "Continue anyway? (y/N)"
+    if ($reply -ne "y" -and $reply -ne "Y") {
+        exit 1
+    }
+}
+
+Write-Host "Launching Chrome with:" -ForegroundColor Cyan
+Write-Host "  --remote-debugging-port=$Port" -ForegroundColor Cyan
+Write-Host "  --remote-debugging-address=0.0.0.0" -ForegroundColor Cyan
+Write-Host "  --remote-allow-origins=*" -ForegroundColor Cyan
+Write-Host "  --user-data-dir=$UserDataDir" -ForegroundColor Cyan
+
+Start-Process -FilePath $ChromePath -ArgumentList @(
+    "--remote-debugging-port=$Port",
+    "--remote-debugging-address=0.0.0.0",
+    "--remote-allow-origins=*",
+    "--user-data-dir=`"$UserDataDir`""
+)
+
+Write-Host ""
+Write-Host "Chrome started. If this is your first run, sign in to your" -ForegroundColor Green
+Write-Host "Google account in the new Chrome window and open"            -ForegroundColor Green
+Write-Host "https://labs.google/flow."                                   -ForegroundColor Green
+Write-Host ""
+Write-Host "Then launch FlowBOFRunner.exe in the same folder."            -ForegroundColor Green
+'@
+Set-Content -Path $StartChromePath -Value $ChromeLauncherContent -Encoding UTF8
+
+# 6. Report.
 $ExePath = Join-Path $RepoRoot "dist\FlowBOFRunner.exe"
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
@@ -288,12 +362,16 @@ Write-Host " Build complete." -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 if (Test-Path $ExePath) {
     $size = (Get-Item $ExePath).Length / 1MB
-    Write-Host ("  exe : {0}  ({1:N1} MB)" -f $ExePath, $size) -ForegroundColor Green
+    Write-Host ("  exe   : {0}  ({1:N1} MB)" -f $ExePath, $size) -ForegroundColor Green
 } else {
     Write-Host "  exe : not found at $ExePath" -ForegroundColor Yellow
     Write-Host "        check PyInstaller output above." -ForegroundColor Yellow
     exit 1
 }
+Write-Host ("  chrome: {0}" -f $StartChromePath) -ForegroundColor Green
+Write-Host ""
+Write-Host " To distribute: ship BOTH files together (e.g. zip both)." -ForegroundColor Yellow
+Write-Host " End user runs 'Start Chrome (debug).ps1' first, then the exe." -ForegroundColor Yellow
 Write-Host ""
 Write-Host " Test it from another PowerShell:" -ForegroundColor Green
 Write-Host "   .\dist\FlowBOFRunner.exe --diagnose" -ForegroundColor Green
