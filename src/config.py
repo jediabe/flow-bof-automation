@@ -147,7 +147,9 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
             video_tile_settle_ms=700,
             video_after_hover_ms=500,
             video_after_menu_click_ms=400,
-            video_between_products_ms=8_000,    # 8s base + jitter
+            # +2s across all modes per end-user feedback — give Flow
+            # a longer breather between video submits.
+            video_between_products_ms=10_000,   # 10s base + jitter
             video_retry_count=3,
         )
     if mode == AUTOMATION_MODE_BALANCED:
@@ -157,7 +159,7 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
             video_tile_settle_ms=400,
             video_after_hover_ms=400,
             video_after_menu_click_ms=300,
-            video_between_products_ms=700,
+            video_between_products_ms=2_700,    # was 700ms; +2s
             video_retry_count=3,
         )
     # fast (default — the previous "safe" defaults are gone)
@@ -167,7 +169,7 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
         video_tile_settle_ms=300,
         video_after_hover_ms=300,
         video_after_menu_click_ms=200,
-        video_between_products_ms=400,
+        video_between_products_ms=2_400,        # was 400ms; +2s
         video_retry_count=2,
     )
 
