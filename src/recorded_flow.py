@@ -1932,28 +1932,9 @@ def perform_recorded_flow(
             composer_start_count,
         )
 
-    # --- Attach each reference image in turn. The prompt + submit
-    # happens once at the end after every image is attached.
-    #
-    # v0.6.15-alpha — flow change:
-    # The previous 3-step sequence (upload → click "+" → click
-    # "Add to Prompt") was the workflow Flow required when the
-    # hidden file input dispatched into a separate upload popover.
-    # Flow has since moved to a paste-equivalent flow where
-    # set_input_files() drops the image straight into the composer
-    # — same path as a manual Ctrl-V into "What do you want to
-    # create?". The "+" button in the new UI opens an unrelated
-    # menu (Agent / tool selector), and "Add to Prompt" only lives
-    # in the tile three-dot menu (used for re-attaching existing
-    # project images), not in any composer popover.
-    #
-    # New sequence: upload + verify composer count incremented.
-    # The legacy "+" / "Add to Prompt" sequence stays in the
-    # codebase (see _locate_plus_button / _locate_add_to_prompt)
-    # because the per-tile "Add to Prompt" still exists and we
-    # may re-introduce a tile-based path later — but the composer
-    # upload no longer needs them.
-    add_to_prompt_enable_timeout_ms = max(selector_timeout_ms * 3, 45_000)  # noqa: F841 — kept for legacy fallback signature
+    # --- Attach each reference image in turn. Steps 1-3 are repeated
+    # for each image; the prompt + submit happens once at the end.
+    add_to_prompt_enable_timeout_ms = max(selector_timeout_ms * 3, 45_000)
     for ref_idx, ref_path in enumerate(all_image_paths, start=1):
         role_label = f"{ref_idx}/{n_total}"
         logger.info(
@@ -1966,9 +1947,54 @@ def perform_recorded_flow(
         # single hidden <input type="file"> but if it ever swaps
         # the element on us, .first picks up whichever one is live.
         _locate_file_input(page).set_input_files(ref_path)
-        logger.info("[FLOW_IMAGE] [ref %s] Uploaded image (auto-attaches in current Flow UI)", role_label)
+        logger.info("[FLOW_IMAGE] [ref %s] Uploaded image", role_label)
 
-        # --- 2. Verify the attach landed using COMPOSER-LOCAL count.
+        # --- 2. Click "+" in composer ---
+        # The JS picker re-runs each call and tags the chosen
+        # button with data-flow-bof-plus, so it survives DOM
+        # reshuffles between iterations.
+        # Humanised click: random coord inside the button + mouse
+        # glide. Reduces the snap-click fingerprint Google's risk
+        # model picks up on stricter accounts (family plan).
+        _human_click(
+            page,
+            _locate_plus_button(page),
+            timeout=selector_timeout_ms,
+            log=logger,
+        )
+        logger.info(
+            "[FLOW_IMAGE] [ref %s] Clicked composer plus button",
+            role_label,
+        )
+
+        # --- 3. Click "Add to Prompt"
+        #
+        # The "Add to Prompt" button stays `disabled` until Flow's
+        # backend finishes processing the upload from step 1. We
+        # explicitly wait for it to become enabled with a longer
+        # budget than the click timeout, so a slow upload doesn't
+        # take the whole batch with it. We re-locate after the wait
+        # because Flow occasionally swaps the underlying element
+        # between the disabled and enabled state.
+        try:
+            expect(_locate_add_to_prompt(page)).to_be_enabled(
+                timeout=add_to_prompt_enable_timeout_ms
+            )
+        except (AssertionError, PlaywrightTimeoutError) as exc:
+            raise RecordedFlowError(
+                f"[ref {role_label}] 'Add to Prompt' button stayed disabled "
+                f"for {add_to_prompt_enable_timeout_ms / 1000:.0f}s — Flow "
+                "is probably still processing the uploaded image, or the "
+                "upload itself failed. Try the row again."
+            ) from exc
+        _human_click(
+            page,
+            _locate_add_to_prompt(page),
+            timeout=selector_timeout_ms,
+            log=logger,
+        )
+
+        # --- 4. Verify the attach landed using COMPOSER-LOCAL count.
         #
         # The count is taken inside the active composer root, so it
         # does NOT include sidebar / library / gallery / result
@@ -1996,13 +2022,11 @@ def perform_recorded_flow(
                 f"[ref {role_label}] expected composer-local count="
                 f"{expected_count} (start={composer_start_count} + "
                 f"{ref_idx} attached), observed={observed}, "
-                f"global_count={global_count}. The set_input_files() upload "
-                "did not auto-attach to the active composer. Either Flow's "
-                "auto-attach behavior reverted to a popover-based flow, the "
-                "composer-root locator drifted, or stale attachments survived "
-                "the clear step. Check Flow's UI manually: drop a file via "
-                "the hidden input — if it doesn't auto-attach, the legacy "
-                "click-+ / Add-to-Prompt code path needs to come back."
+                f"global_count={global_count}. The Add to Prompt click did "
+                "not produce a new attachment INSIDE the active composer, "
+                "or the composer-root locator drifted. Check whether stale "
+                "composer attachments survived the clear step, or whether "
+                "Flow swapped to a different composer (e.g. video tab)."
             ) from exc
         logger.info(
             "[FLOW_IMAGE] Attached reference %d/%d; composer count=%d",
