@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from patchright.sync_api import (
+from playwright.sync_api import (
     Locator,
     Page,
     TimeoutError as PlaywrightTimeoutError,

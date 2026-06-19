@@ -50,20 +50,17 @@ IS_WIN = sys.platform.startswith("win")
 
 block_cipher = None
 
-# v0.6.15-alpha — Patchright bundles its Node.js driver under
-# site-packages/patchright/driver/ as raw binary data, not a Python
-# module. PyInstaller's static scan doesn't pick those up — they're
-# data files, not imports. Without them, sync_playwright().start()
-# raises FileNotFoundError because the driver binary isn't on disk
-# at runtime. Same applies to patchright's bundled package.json and
-# its node_modules tree (loaded by the driver process).
+# v0.6.15-alpha-2 — reverted to playwright (Patchright was breaking
+# the Flow click flow). Playwright bundles its Node driver under
+# site-packages/playwright/driver/ too, but PyInstaller's built-in
+# playwright hook already collects those data files so we don't
+# need an explicit collect_data_files for it.
 #
-# pyautogui's pyscreeze / mouseinfo subdeps similarly ship platform
-# binaries (pymsgbox dialog assets, mouseinfo's GUI .png icons).
-# Bundling them keeps human_mouse.py's fallback path crash-free.
+# pyautogui's pyscreeze / mouseinfo subdeps ship platform binaries
+# that PyInstaller's static scan misses. Bundle them so the os_native
+# click path stays usable on the operator's machine.
 runtime_datas = (
-    collect_data_files("patchright")
-    + collect_data_files("pyautogui")
+    collect_data_files("pyautogui")
     + collect_data_files("pyscreeze")
     + collect_data_files("mouseinfo")
 )
@@ -75,12 +72,9 @@ runtime_datas = (
 hidden_imports = (
     collect_submodules("src")
     + collect_submodules("src.runner_app")
-    # v0.6.15-alpha — runner now imports patchright (drop-in
-    # playwright fork). Submodules need explicit collection because
-    # patchright loads pieces dynamically. pyautogui likewise has
-    # platform-conditional submodules (_pyautogui_win / _x11 /
-    # _osx) that PyInstaller's static scan misses.
-    + collect_submodules("patchright")
+    # pyautogui has platform-conditional submodules
+    # (_pyautogui_win / _x11 / _osx) that PyInstaller's static scan
+    # misses, so collect them explicitly.
     + collect_submodules("pyautogui")
     + [
         # httpx + dependencies
@@ -88,14 +82,14 @@ hidden_imports = (
         "httpx._transports.default",
         # python-dotenv is loaded by src.config at import time
         "dotenv",
-        # Patchright runtime — same shape as playwright. Sync API
-        # is what our modules import; the async variants come in
-        # via collect_submodules("patchright") above.
-        "patchright",
-        "patchright.sync_api",
-        # pyautogui imports — see hidden_imports comment above.
-        # pymsgbox and pytweening are runtime deps that pyautogui
-        # pulls in but doesn't list in __init__'s imports.
+        # Playwright runtime. (`_impl._api_types` was removed in
+        # newer Playwright builds; rely on collect_submodules above
+        # to gather whatever the installed version actually ships.)
+        "playwright",
+        "playwright.sync_api",
+        # pyautogui runtime deps that don't show in __init__'s
+        # imports — bundle explicitly so the os_native click path
+        # works in the packaged exe.
         "pyautogui",
         "pymsgbox",
         "pytweening",

@@ -26,12 +26,17 @@ from pathlib import Path
 from typing import Iterator
 from urllib.parse import urljoin, urlparse
 
-# Patchright is a drop-in fork of Playwright that suppresses the
-# Runtime.enable CDP leak, moves init scripts into isolated worlds
-# (so __pwInitScripts never lands on window), and applies other
-# automation-fingerprint fixes that vanilla Playwright cannot.
-# See research notes in docs/ANTI_BLOCK.md (v0.6.15-alpha).
-from patchright.sync_api import (
+# v0.6.15-alpha-2: reverted from patchright back to playwright.
+# Patchright's CDP scrubbing (Runtime.enable suppression / isolated-
+# world init scripts) was silently breaking the set_input_files →
+# "+" → "Add to Prompt" sequence on Flow's composer. End-user
+# confirmed v0.6.14 worked end-to-end; the import swap was the
+# only meaningful diff in the click hot path. We keep every other
+# v0.6.15 win (HTTP-level PUBLIC_ERROR_UNUSUAL_ACTIVITY listener,
+# daily cap, cooldown bookkeeping, MOUSE_STRATEGY=os_native opt-in).
+# A follow-up release can revisit Patchright (or rebrowser-patches)
+# with a controlled test on Flow specifically.
+from playwright.sync_api import (
     Browser,
     BrowserContext,
     Page,
@@ -75,25 +80,22 @@ class FlowSession:
 @contextmanager
 def open_flow_browser(settings: Settings, logger: logging.Logger) -> Iterator[FlowSession]:
     """Yield a FlowSession appropriate for the configured BROWSER_MODE."""
-    # v0.6.15-alpha — Patchright (sync_playwright underneath) spawns
-    # a bundled Node.js driver subprocess on enter. If the driver
-    # binary isn't on disk where the wrapper expects it (wheel
-    # installed but post-install browser bootstrap skipped, OR a
-    # packaged exe that's missing patchright/driver/* data files),
+    # Playwright spawns a bundled Node.js driver subprocess on
+    # enter. If the driver binary isn't on disk where the wrapper
+    # expects it (wheel installed but the driver folder missing),
     # __enter__ throws a bare FileNotFoundError([WinError 2]) with
-    # no path. Translate that to a clear remediation message before
-    # it leaks to the job dispatcher.
+    # no path. Translate that to a clear remediation message
+    # before it leaks to the job dispatcher.
     pw_ctx = sync_playwright()
     try:
         pw = pw_ctx.__enter__()
     except FileNotFoundError as exc:
         raise FlowAutomationError(
-            "Patchright's bundled driver binary is missing on disk. "
-            "On a source install, run `python -m patchright install chromium` "
-            "(downloads the patched Chromium AND ensures the Node driver "
-            "is in place). On a packaged dmg/exe this indicates the build "
-            "skipped Patchright's data files — rebuild from a commit that "
-            "includes collect_data_files('patchright') in FlowBOFRunner.spec. "
+            "Playwright's bundled driver binary is missing on disk. "
+            "Run `pip install --upgrade --force-reinstall playwright==1.48.0` "
+            "to refresh the wheel. If the runner is a packaged exe, "
+            "rebuild — PyInstaller's playwright hook is what normally "
+            "ships the driver. "
             f"Original error: {exc}"
         ) from exc
 

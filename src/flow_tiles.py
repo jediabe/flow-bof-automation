@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlparse
 
-from patchright.sync_api import Page
+from playwright.sync_api import Page
 
 
 @dataclass
