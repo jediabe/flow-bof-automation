@@ -11,9 +11,19 @@
 # If a packaging run starts complaining about a missing module,
 # add it here AND to FlowBOFRunner.spec's hidden_imports.
 
-playwright==1.48.0
+# Patchright — drop-in Playwright fork with stealth patches
+# (Runtime.enable suppression, isolated-world init scripts).
+# Required by all browser-driving modules in src/. See v0.6.15-alpha
+# changelog and docs/ANTI_BLOCK.md.
+patchright>=1.48.0
 python-dotenv==1.0.1
 httpx<0.28
+
+# Real-OS mouse synthesis for the human-click hot path. Used when
+# MOUSE_STRATEGY=os_native (the default in v0.6.15-alpha). Falls
+# back to CDP transparently when pyautogui can't initialise (no
+# display, window not focused, DPI weirdness).
+pyautogui>=0.9.54
 
 # Build tooling.
 pyinstaller>=6.10

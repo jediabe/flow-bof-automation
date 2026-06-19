@@ -57,17 +57,32 @@ block_cipher = None
 hidden_imports = (
     collect_submodules("src")
     + collect_submodules("src.runner_app")
+    # v0.6.15-alpha — runner now imports patchright (drop-in
+    # playwright fork). Submodules need explicit collection because
+    # patchright loads pieces dynamically. pyautogui likewise has
+    # platform-conditional submodules (_pyautogui_win / _x11 /
+    # _osx) that PyInstaller's static scan misses.
+    + collect_submodules("patchright")
+    + collect_submodules("pyautogui")
     + [
         # httpx + dependencies
         "httpx",
         "httpx._transports.default",
         # python-dotenv is loaded by src.config at import time
         "dotenv",
-        # Playwright runtime. (`_impl._api_types` was removed in
-        # newer Playwright builds; rely on collect_submodules above
-        # to gather whatever the installed version actually ships.)
-        "playwright",
-        "playwright.sync_api",
+        # Patchright runtime — same shape as playwright. Sync API
+        # is what our modules import; the async variants come in
+        # via collect_submodules("patchright") above.
+        "patchright",
+        "patchright.sync_api",
+        # pyautogui imports — see hidden_imports comment above.
+        # pymsgbox and pytweening are runtime deps that pyautogui
+        # pulls in but doesn't list in __init__'s imports.
+        "pyautogui",
+        "pymsgbox",
+        "pytweening",
+        "pyscreeze",
+        "mouseinfo",
         # GUI module is at the top level (not under src.) and is
         # imported lazily inside `if args.gui:` / the interactive
         # menu — PyInstaller's static analysis misses lazy conditional
