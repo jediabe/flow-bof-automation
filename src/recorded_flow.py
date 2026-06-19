@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from playwright.sync_api import (
+from patchright.sync_api import (
     Locator,
     Page,
     TimeoutError as PlaywrightTimeoutError,
@@ -1071,6 +1071,18 @@ def _human_click(
     target_y = random.uniform(my_min, my_max)
     steps = random.randint(*steps_range)
 
+    # v0.6.15-alpha — try OS-level mouse synthesis (pyautogui) FIRST.
+    # CDP Input.dispatchMouseEvent produces isTrusted=true but the
+    # path/cadence fingerprint is detectable by ML behavioral
+    # classifiers (arxiv 2410.18233: 96-98% acc on naive Bezier).
+    # pyautogui drives the real OS pointer — Chrome receives genuine
+    # OS mouse events including the natural OS-level cadence.
+    # Falls back to CDP transparently when not usable (window not
+    # focused, no display, DPI/coord weirdness).
+    from .human_mouse import os_native_click  # local import for fast startup
+    if os_native_click(page, target_x, target_y, log=log):
+        return
+
     try:
         page.mouse.move(target_x, target_y, steps=steps)
         page.wait_for_timeout(random.randint(*settle_ms_range))
@@ -1542,6 +1554,121 @@ def detect_flow_unusual_activity(page: Page) -> str | None:
         if needle in body_lower:
             return code
     return None
+
+
+# v0.6.15-alpha — HTTP-response level detector for the Flow API's
+# {"error":{"code":403,"status":"PERMISSION_DENIED","details":[{
+# "reason":"PUBLIC_ERROR_UNUSUAL_ACTIVITY"}]}} envelope. This is more
+# reliable than the DOM-text scan above because:
+#
+#   1. The JSON error code is unambiguous — no localisation surprises.
+#   2. It fires the moment Flow rejects the submit, before any banner
+#      gets rendered (the React app sometimes swallows the error
+#      visually for a beat).
+#   3. We can distinguish UNUSUAL_ACTIVITY from UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC
+#      (a sub-variant some flow2api users reported — pure volume signal
+#      vs. fingerprint/behavioral signal). The mitigation differs:
+#      TOO_MUCH_TRAFFIC means slow the per-day cap; plain UNUSUAL_ACTIVITY
+#      means our session score is in the gutter.
+#
+# Caller wires this up via page.on("response", ...) once per Flow tab.
+# The recorded list is flushed by reset_unusual_activity_signal() at
+# the start of every job so a stale detection from a previous run
+# doesn't poison the current one.
+
+# Module-level holder for the most recent detection. Single-threaded
+# (recorded_flow callers are all sync), so a plain list is fine.
+_UNUSUAL_ACTIVITY_REASONS: list[str] = []
+
+
+def reset_unusual_activity_signal() -> None:
+    """Clear the most-recent unusual-activity reason. Called at the
+    start of each generate-images / generate-videos job so a stale
+    detection doesn't carry over."""
+    _UNUSUAL_ACTIVITY_REASONS.clear()
+
+
+def current_unusual_activity_reason() -> str | None:
+    """Return the most-recent PUBLIC_ERROR_UNUSUAL_ACTIVITY* reason
+    string observed since the last reset, or None."""
+    return _UNUSUAL_ACTIVITY_REASONS[-1] if _UNUSUAL_ACTIVITY_REASONS else None
+
+
+# Reason strings the Flow API returns. Treat any of these as a
+# session-score event the caller MUST abort on.
+_UNUSUAL_ACTIVITY_PREFIX = "PUBLIC_ERROR_UNUSUAL_ACTIVITY"
+
+
+def install_unusual_activity_listener(page: Page, log: logging.Logger | None = None) -> None:
+    """Attach a page.on('response') listener that watches for the
+    reCAPTCHA-evaluation-failed JSON envelope and stashes the reason
+    in module state for the caller to pick up.
+
+    Idempotent per page: re-installing is a no-op cost-wise. Designed
+    so the entry point (e.g. handle_agent_job) can call this once
+    after `_attach_remote_chrome` and forget about it.
+
+    Never raises — listener errors must not take down the page.
+    """
+    log = log or logging.getLogger("flow_bof")
+
+    def _on_response(response):  # noqa: ANN001 — Patchright Response
+        try:
+            # Cheap pre-filter: only inspect 4xx/5xx responses to
+            # /aisandbox/labs/aisandbox so we don't deserialize every
+            # JSON response on the page (Flow ships dozens).
+            url = response.url or ""
+            if "labs.google" not in url and "aisandbox" not in url:
+                return
+            if response.status < 400:
+                return
+            # JSON bodies only — Flow's error envelope is JSON.
+            ctype = (response.headers.get("content-type") or "").lower()
+            if "json" not in ctype:
+                return
+            try:
+                body = response.json()
+            except Exception:  # noqa: BLE001
+                return
+            err = (body or {}).get("error") or {}
+            details = err.get("details") or []
+            for d in details:
+                reason = (d or {}).get("reason") or ""
+                if reason.startswith(_UNUSUAL_ACTIVITY_PREFIX):
+                    _UNUSUAL_ACTIVITY_REASONS.append(reason)
+                    log.warning(
+                        "Flow API rejected request — reason=%s url=%s. "
+                        "Caller MUST abort this batch.",
+                        reason, url,
+                    )
+                    return
+            # Also surface the bare reCAPTCHA evaluation failed
+            # message when the details array is empty (some early
+            # Flow responses come through that way).
+            msg = (err.get("message") or "").lower()
+            if "recaptcha evaluation failed" in msg:
+                _UNUSUAL_ACTIVITY_REASONS.append("PUBLIC_ERROR_UNUSUAL_ACTIVITY")
+                log.warning(
+                    "Flow API rejected request — message=%s url=%s. "
+                    "Treating as PUBLIC_ERROR_UNUSUAL_ACTIVITY.",
+                    err.get("message"), url,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("install_unusual_activity_listener: handler error: %s", _short_err(exc))
+
+    page.on("response", _on_response)
+
+
+class UnusualActivityAbort(Exception):
+    """Raised by the bulk loops when the HTTP listener or DOM scan
+    detects a PUBLIC_ERROR_UNUSUAL_ACTIVITY*. Carries the reason
+    string so the agent_api job dispatcher can post a typed event
+    back to the SaaS."""
+
+    def __init__(self, reason: str, *, source: str = "http"):
+        super().__init__(f"Flow returned {reason} ({source}); aborting batch")
+        self.reason = reason
+        self.source = source
 
 
 # ---------------------------------------------------------------------------

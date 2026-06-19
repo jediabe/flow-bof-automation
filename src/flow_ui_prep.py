@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     # dep of this module's import surface so health_check / diagnose
     # can pull `flow_ui_prep` for `is_prep_enabled()` without a
     # browser stack.
-    from playwright.sync_api import Page
+    from patchright.sync_api import Page
 
 
 # ---------------------------------------------------------------------

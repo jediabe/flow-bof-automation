@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from playwright.sync_api import Page
+from patchright.sync_api import Page
 
 from .config import Settings
 from .flow_automation import acquire_flow_page, open_flow_browser

@@ -25,7 +25,12 @@ from pathlib import Path
 from typing import Iterator
 from urllib.parse import urljoin, urlparse
 
-from playwright.sync_api import (
+# Patchright is a drop-in fork of Playwright that suppresses the
+# Runtime.enable CDP leak, moves init scripts into isolated worlds
+# (so __pwInitScripts never lands on window), and applies other
+# automation-fingerprint fixes that vanilla Playwright cannot.
+# See research notes in docs/ANTI_BLOCK.md (v0.6.15-alpha).
+from patchright.sync_api import (
     Browser,
     BrowserContext,
     Page,

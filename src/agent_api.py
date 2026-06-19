@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.14-alpha"
+APP_VERSION = "0.6.15-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +962,17 @@ def _handle_generate_flow_videos_from_favorites(
                     ),
                 )
 
+            # v0.6.15-alpha — same HTTP-level unusual-activity listener
+            # used by image gen. The video-gen path can also trip
+            # reCAPTCHA Enterprise; catching it early lets us abort
+            # before submitting the next video.
+            from .recorded_flow import (
+                install_unusual_activity_listener,
+                reset_unusual_activity_signal,
+            )
+            reset_unusual_activity_signal()
+            install_unusual_activity_listener(page, logger)
+
             try:
                 tiles = scan_tiles(page, logger=logger)
             except Exception as exc:  # noqa: BLE001
@@ -1823,6 +1834,19 @@ def _handle_generate_flow_images(
                 len(valid_items), settings.automation_mode, wait_mode,
             )
 
+            # v0.6.15-alpha — install the HTTP-response listener that
+            # catches Flow's {error:{code:403, reason:PUBLIC_ERROR_UNUSUAL_ACTIVITY*}}
+            # envelope. Catches the score event before any banner
+            # renders. The DOM-text scanner below still runs as a
+            # backup. Clear any leftover signal from a previous job.
+            from .recorded_flow import (
+                install_unusual_activity_listener,
+                reset_unusual_activity_signal,
+                current_unusual_activity_reason,
+            )
+            reset_unusual_activity_signal()
+            install_unusual_activity_listener(page, logger)
+
             # Risk-engine detection state. Set on first hit; the loop
             # exits at the next iteration boundary so the in-flight
             # item finishes (or fails) cleanly without partial state.
@@ -1866,6 +1890,28 @@ def _handle_generate_flow_images(
                 # iteration because there's no prior submit yet —
                 # the very first item runs unconditionally.
                 if n > 1:
+                    # Cheap HTTP-signal check first — fires the
+                    # moment Flow's API returns 403/PUBLIC_ERROR_*.
+                    # Faster + more deterministic than DOM scraping.
+                    http_reason = current_unusual_activity_reason()
+                    if http_reason:
+                        logger.warning(
+                            "Flow API rejected after item %d (%s). "
+                            "Stopping batch — the SaaS will surface a "
+                            "cooldown banner. Further submits would "
+                            "compound the session score.",
+                            n - 1, http_reason,
+                        )
+                        # Normalise the variant codes so the SaaS
+                        # can branch on the high-level reason.
+                        flow_risk_code = (
+                            "unusual_activity_too_much_traffic"
+                            if "TOO_MUCH_TRAFFIC" in http_reason
+                            else "unusual_activity"
+                        )
+                        flow_risk_after_item = n - 1
+                        break
+
                     from .recorded_flow import detect_flow_unusual_activity
                     risk = detect_flow_unusual_activity(page)
                     if risk:

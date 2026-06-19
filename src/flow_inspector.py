@@ -55,7 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from playwright.sync_api import (
+from patchright.sync_api import (
     Page,
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,

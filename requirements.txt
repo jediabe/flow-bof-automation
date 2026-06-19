@@ -1,6 +1,17 @@
-playwright==1.48.0
+# Patchright — drop-in Playwright fork that suppresses Runtime.enable
+# CDP leak, moves init scripts to isolated worlds (no __pwInitScripts
+# global), and applies other automation-fingerprint fixes. Closes a
+# set of leaks vanilla Playwright cannot. Same sync_api / async_api
+# surface, so callers just swap the import.
+patchright>=1.48.0
 python-dotenv==1.0.1
 streamlit==1.39.0
+# Real-OS mouse synthesis for the human-click hot path. Used when
+# MOUSE_STRATEGY=os_native; falls back to CDP Input.dispatchMouseEvent
+# (the playwright/patchright default) when pyautogui isn't usable
+# (no display, window not focused, etc.). Cross-platform: works on
+# Win/Mac/Linux.
+pyautogui>=0.9.54
 # AI providers used by ai/prompt_generator.py.
 # `anthropic` only fires when AI_PROVIDER=anthropic, `openai` for both
 # openai and openrouter (the latter uses the OpenAI client with a
