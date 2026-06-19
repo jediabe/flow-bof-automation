@@ -50,17 +50,22 @@ IS_WIN = sys.platform.startswith("win")
 
 block_cipher = None
 
-# v0.6.15-alpha-2 — reverted to playwright (Patchright was breaking
-# the Flow click flow). Playwright bundles its Node driver under
-# site-packages/playwright/driver/ too, but PyInstaller's built-in
-# playwright hook already collects those data files so we don't
-# need an explicit collect_data_files for it.
+# v0.6.15-alpha-3 — explicit data-file collection for playwright.
+# We were relying on PyInstaller's built-in playwright hook to
+# bundle site-packages/playwright/driver/ — but that hook
+# either depends on the contrib package being current OR doesn't
+# fire on every PyInstaller version. End-user rebuilt and still
+# hit FileNotFoundError for the driver binary, so we're now
+# explicitly collecting playwright's data files alongside the
+# pyautogui chain. Belt-and-suspenders — harmless if the hook
+# was already doing it.
 #
 # pyautogui's pyscreeze / mouseinfo subdeps ship platform binaries
 # that PyInstaller's static scan misses. Bundle them so the os_native
 # click path stays usable on the operator's machine.
 runtime_datas = (
-    collect_data_files("pyautogui")
+    collect_data_files("playwright")
+    + collect_data_files("pyautogui")
     + collect_data_files("pyscreeze")
     + collect_data_files("mouseinfo")
 )
