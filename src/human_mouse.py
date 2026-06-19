@@ -72,9 +72,21 @@ def strategy() -> str:
 
     Reads MOUSE_STRATEGY at call time so env changes take effect
     on the next click without a runner restart.
+
+    v0.6.15-alpha shipped this defaulted to 'os_native' but an
+    end-user on Windows reported clicks landing off-target across
+    a whole batch (UI selectors timing out because the upstream
+    "+" upload click missed the button → reference image never
+    attached → "Add to Prompt" element never rendered). Almost
+    certainly Windows DPI scaling: pyautogui isn't DPI-aware by
+    default, so at 125%/150% display scale every click lands at
+    `coord * scale` instead of `coord`. Until we ship proper DPI
+    detection, default to the known-safe CDP path. Operators
+    who've verified pyautogui works on their machine can opt in
+    with MOUSE_STRATEGY=os_native.
     """
-    raw = (os.getenv("MOUSE_STRATEGY") or "os_native").strip().lower()
-    return raw if raw in ("cdp", "os_native") else "os_native"
+    raw = (os.getenv("MOUSE_STRATEGY") or "cdp").strip().lower()
+    return raw if raw in ("cdp", "os_native") else "cdp"
 
 
 @dataclass
