@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.15-alpha"
+APP_VERSION = "0.6.16-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -969,9 +969,20 @@ def _handle_generate_flow_videos_from_favorites(
             from .recorded_flow import (
                 install_unusual_activity_listener,
                 reset_unusual_activity_signal,
+                current_unusual_activity_reason,
             )
             reset_unusual_activity_signal()
             install_unusual_activity_listener(page, logger)
+
+            # Risk-engine state for the per-tile loop. Mirrors the
+            # image-gen handler. flow_risk_code is set on first hit;
+            # the loop exits at the next iteration boundary so the
+            # in-flight submit (which we've already paid for) gets
+            # the chance to complete cleanly. flow_risk_after_item
+            # tells the SaaS how many tiles were attempted before
+            # the abort.
+            flow_risk_code: str | None = None
+            flow_risk_after_item: int = 0
 
             try:
                 tiles = scan_tiles(page, logger=logger)
@@ -1036,6 +1047,30 @@ def _handle_generate_flow_videos_from_favorites(
 
             # ---- Per-tile loop ----------------------------------------
             for n, tile in enumerate(to_submit, start=1):
+                # v0.6.15-alpha — check the HTTP listener BEFORE
+                # submitting the next tile. If Flow flagged the
+                # previous submit with PUBLIC_ERROR_UNUSUAL_ACTIVITY*,
+                # we abort here rather than burning more submits
+                # into a session whose score is already in the
+                # gutter. Skipped on iteration 1 (no prior submit).
+                if n > 1:
+                    http_reason = current_unusual_activity_reason()
+                    if http_reason:
+                        logger.warning(
+                            "Flow API rejected video submit after tile %d "
+                            "(%s). Stopping batch — further submits would "
+                            "compound the session score. SaaS will surface "
+                            "a cooldown banner.",
+                            n - 1, http_reason,
+                        )
+                        flow_risk_code = (
+                            "unusual_activity_too_much_traffic"
+                            if "TOO_MUCH_TRAFFIC" in http_reason
+                            else "unusual_activity"
+                        )
+                        flow_risk_after_item = n - 1
+                        break
+
                 logger.info(
                     "--- [%d/%d] media_id=%s tile_id=%s edit_id=%s",
                     n, len(to_submit),
@@ -1230,6 +1265,53 @@ def _handle_generate_flow_videos_from_favorites(
         )
 
     elapsed_seconds = round(time.monotonic() - started_at, 2)
+
+    # v0.6.15-alpha — if the per-tile loop aborted because Flow
+    # returned PUBLIC_ERROR_UNUSUAL_ACTIVITY*, surface a typed
+    # failure with risk_phrase so the SaaS can stamp
+    # WorkspaceSettings.lastUnusualActivityAt and the cooldown
+    # banner kicks in on the batch page. Mirrors the image-gen
+    # handler's risk-engine short-circuit at agent_api.py:2189+.
+    if flow_risk_code:
+        emit(
+            "rate_limited",
+            f"Google Flow risk-engine error detected ({flow_risk_code}). "
+            f"Stopped after {submitted} successful submit(s); "
+            f"{len(to_submit) - flow_risk_after_item} tile(s) "
+            f"unsubmitted. Wait 30-60 minutes before trying again.",
+            details={
+                "code":                "FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY",
+                "risk_phrase":         flow_risk_code,
+                "stopped_after_item":  flow_risk_after_item,
+                "submitted":           submitted,
+                "failed":              failed,
+                "unsubmitted":         len(to_submit) - flow_risk_after_item,
+                "elapsed_seconds":     elapsed_seconds,
+            },
+        )
+        return _failure(
+            job,
+            "FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY",
+            (
+                f"Google Flow flagged the session as 'unusual activity' "
+                f"after tile {flow_risk_after_item}. Stopped to avoid "
+                f"raising the risk score further. Wait 30-60 minutes "
+                f"and try again; consider running smaller batches with "
+                f"longer between-tile delays."
+            ),
+            details={
+                "risk_phrase":         flow_risk_code,
+                "stopped_after_item":  flow_risk_after_item,
+                "submitted":           submitted,
+                "failed":              failed,
+                "unsubmitted":         len(to_submit) - flow_risk_after_item,
+                "blanket_video_prompt_used":  blanket_prompt,
+                "blanket_prompt_source":      blanket_source,
+                "elapsed_seconds":     elapsed_seconds,
+                "items":               items,
+            },
+        )
+
     emit(
         "complete",
         "Video generation complete.",
