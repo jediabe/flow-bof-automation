@@ -144,17 +144,25 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
         return dict(
             image_between_products_ms=5_000,    # 5s base + 0-25s jitter (max 30s)
             image_ui_settle_ms=400,
-            video_tile_settle_ms=700,
-            video_after_hover_ms=500,
-            video_after_menu_click_ms=400,
-            # v0.6.17-alpha — bumped 10s → 15s. Combined with the
-            # new _between_tiles_delay() jitter (0-25s) and rest
-            # cadence (45-90s every 5 tiles), family_plan video
-            # submits now space out at 15-40s mean ~27s with
-            # multi-minute pauses. Targets the
-            # PUBLIC_ERROR_UNUSUAL_ACTIVITY signals end-user has
-            # been hitting on video gen specifically.
-            video_between_products_ms=15_000,
+            # v0.6.18-alpha — video flow is scored MORE aggressively
+            # than image flow on Flow's risk engine (each submit
+            # queues a multi-minute server-side render → higher cost
+            # → tighter scoring). End-user reported image gen works
+            # fine in the same session but video gen consistently
+            # trips PUBLIC_ERROR_UNUSUAL_ACTIVITY. Per-action settles
+            # roughly 2x'd so the hover → menu → animate click
+            # sequence stretches from ~1.6s end-to-end to ~3.5-4.5s
+            # (after _j jitter), matching a deliberate-human click
+            # cadence rather than a bot's burst.
+            video_tile_settle_ms=1500,    # was 700
+            video_after_hover_ms=1200,    # was 500
+            video_after_menu_click_ms=800,    # was 400
+            # Inter-tile delay bumped 15s → 25s base. With
+            # _between_tiles_delay() adding 0-30s jitter (was
+            # 0-25s) and rest cadence dropped to every 2 tiles
+            # (was every 5), family_plan now spaces video submits
+            # at 25-55s mean ~40s, with 60-120s rests in between.
+            video_between_products_ms=25_000,
             video_retry_count=3,
         )
     if mode == AUTOMATION_MODE_BALANCED:

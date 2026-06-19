@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.17-alpha"
+APP_VERSION = "0.6.18-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -346,25 +346,26 @@ def _between_tiles_delay(
     from .config import AUTOMATION_MODE_FAMILY_PLAN
     base_ms = settings.video_between_products_ms
     if settings.automation_mode == AUTOMATION_MODE_FAMILY_PLAN:
-        # 10s base (from config) + 0-25s jitter. Range 10-35s,
-        # mean ~22s. Slightly slower than image gen because video
-        # submits hit Flow harder (each one queues a multi-minute
-        # render server-side) — Flow's risk scoring may weight
-        # them differently.
-        jitter_ms = random.randint(0, 25_000)
+        # v0.6.18-alpha — 25s base + 0-30s jitter. Range 25-55s,
+        # mean ~40s. Bumped from v0.6.17's 15s base + 0-25s
+        # because video kept tripping unusual_activity at the
+        # tighter cadence. Video submits are scored harder than
+        # image submits on Flow (each queues a server render);
+        # the floor + jitter range now matches a deliberate-
+        # human click-through-the-gallery cadence.
+        jitter_ms = random.randint(0, 30_000)
         total_ms = base_ms + jitter_ms
         logger.info(
             "Family-plan inter-tile delay: %.1fs (base=%dms + jitter=%dms)",
             total_ms / 1000, base_ms, jitter_ms,
         )
         page.wait_for_timeout(total_ms)
-        # Periodic rest every 5 tiles — videos are slow-paced
-        # already so this only fires on the medium / large
-        # batches. The image-gen rest is every 15 items because
-        # those batches are larger and the per-item time is
-        # smaller; videos see this at 5.
-        if n_completed > 0 and n_completed % 5 == 0:
-            rest_ms = random.randint(45_000, 90_000)
+        # Rest every 2 tiles now (was every 5). User's typical
+        # video batches are 3-6 tiles; every-5 never fired in
+        # most batches. Every-2 means a rest after every other
+        # submit. 60-120s window (was 45-90s).
+        if n_completed > 0 and n_completed % 2 == 0:
+            rest_ms = random.randint(60_000, 120_000)
             logger.info(
                 "Family-plan periodic rest (video): %.0fs after %d tiles",
                 rest_ms / 1000, n_completed,
@@ -1098,6 +1099,40 @@ def _handle_generate_flow_videos_from_favorites(
                     "to_process":                 len(to_submit),
                 },
             )
+
+            # v0.6.18-alpha — pre-batch warmup pause (family_plan
+            # only). End-user reported video gen consistently
+            # tripping unusual_activity even on tile 1, while
+            # image gen on the SAME session works fine. The
+            # session-level signal isn't the issue; the
+            # video-flow startup is. A human doesn't open Flow
+            # and immediately Animate the most recent tile —
+            # they scroll, hover, look around for ~60-120s
+            # first. The runner has no scroll-around code, so
+            # the next best thing is a one-time pause before
+            # any video submit happens.
+            #
+            # 60-120s window picked because it's "long enough
+            # to look like reading the gallery, short enough
+            # not to feel like the runner stalled." Other
+            # modes skip — operators who pick balanced / fast
+            # have explicitly opted out of safety.
+            from .config import AUTOMATION_MODE_FAMILY_PLAN
+            if (
+                settings.automation_mode == AUTOMATION_MODE_FAMILY_PLAN
+                and to_submit
+            ):
+                warmup_ms = random.randint(60_000, 120_000)
+                logger.info(
+                    "Family-plan pre-batch warmup: %.0fs before first video submit",
+                    warmup_ms / 1000,
+                )
+                emit(
+                    "warmup",
+                    f"Warming up for {warmup_ms / 1000:.0f}s before first video — "
+                    "humanising the click-through cadence to avoid unusual_activity.",
+                )
+                page.wait_for_timeout(warmup_ms)
 
             # ---- Per-tile loop ----------------------------------------
             for n, tile in enumerate(to_submit, start=1):
