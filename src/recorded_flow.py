@@ -1095,6 +1095,62 @@ def _human_click(
         locator.click(timeout=timeout)
 
 
+def _human_type(
+    page: Page,
+    locator: Locator,
+    text: str,
+    *,
+    log: logging.Logger | None = None,
+    per_char_ms_range: tuple[int, int] = (45, 130),
+    thinking_pause_probability: float = 0.04,
+    thinking_pause_ms_range: tuple[int, int] = (180, 650),
+) -> None:
+    """Type `text` into `locator` one character at a time with
+    jittered delays.
+
+    Replaces ``locator.fill(text)``, which sets the contenteditable's
+    value in a SINGLE CDP call. ``fill()`` produces zero keystroke
+    timing signal — reCAPTCHA Enterprise's behavioral scorer treats
+    instantaneous-text-insert as a strong bot tell. This helper
+    types char-by-char via ``page.keyboard.type()`` with per-char
+    delay jitter (45-130 ms typical, ~600 chpm = ~120 wpm peak,
+    realistic for an attentive user copy-pasting from notes) and
+    occasional "thinking pauses" between chars.
+
+    Caveats:
+      - The locator must be focusable. We click it first to make
+        sure the keyboard goes into the right element.
+      - For contenteditable divs (Flow's composer), pressing keys
+        appends — no need to clear first IF the field is empty.
+        The callers already navigate from a clean state so we
+        skip the select-all+delete dance here.
+      - Performance: an N-char string costs N CDP round-trips
+        (~50-150 ms each). A 130-char prompt is ~10-20 s of typing.
+        That's the POINT — humans take time to type.
+    """
+    log = log or logging.getLogger("flow_bof")
+    if not text:
+        return
+    # Focus the field. Click is more reliable than .focus() for
+    # contenteditable in Chrome — focus() doesn't fire all the
+    # React event handlers Flow expects.
+    locator.click()
+    # Tiny settle so the click's focus event lands before the
+    # first keystroke.
+    page.wait_for_timeout(random.randint(80, 220))
+    for ch in text:
+        page.keyboard.type(ch, delay=random.randint(*per_char_ms_range))
+        # Occasional "thinking pause" — humans glance away, re-read,
+        # take a sip of coffee. Set at 4% per char so a 130-char
+        # prompt typically has 5-6 of them.
+        if random.random() < thinking_pause_probability:
+            page.wait_for_timeout(random.randint(*thinking_pause_ms_range))
+    log.info(
+        "_human_type: typed %d chars (range=%s ms/char, pauses ~%d%%)",
+        len(text), per_char_ms_range, int(thinking_pause_probability * 100),
+    )
+
+
 def _locate_prompt_input(page: Page) -> Locator:
     # Recorded: input events fired on a contenteditable div at (698, 881)
     # with role="textbox" and contenteditable="true". Scoped to the
@@ -2052,23 +2108,32 @@ def perform_recorded_flow(
             "popover may not have dismissed."
         ) from exc
     prompt_input = _locate_prompt_input(page)
-    prompt_input.click()
-    prompt_input.fill(prompt)
+    # v0.6.19-alpha — type instead of fill so reCAPTCHA sees
+    # actual keystroke events with realistic timing instead of a
+    # single instant-text-insert (huge bot tell).
+    _human_type(page, prompt_input, prompt, log=logger)
     if not _is_prompt_text_present(prompt_input, prompt):
-        # Retry once — a stale fill on a recently re-rendered
-        # contenteditable can drop the text on the first try.
+        # Retry once — sometimes the contenteditable rejects keys
+        # on a recently re-rendered element. Fall back to fill on
+        # the retry so we don't lose the prompt.
         logger.warning(
-            "Prompt text not visible after first fill; re-locating + retrying."
+            "Prompt text not visible after _human_type; re-locating + "
+            "falling back to fill() for the retry."
         )
         prompt_input = _locate_prompt_input(page)
         prompt_input.click()
         prompt_input.fill(prompt)
         if not _is_prompt_text_present(prompt_input, prompt):
             raise RecordedFlowError(
-                "Prompt text not visible in composer after fill() (retry "
-                "exhausted); refusing to log 'Prompt inserted'."
+                "Prompt text not visible in composer after _human_type + "
+                "fill() retry; refusing to log 'Prompt inserted'."
             )
     logger.info("Prompt inserted")
+
+    # v0.6.19-alpha — "re-read the prompt" pause before submit.
+    # Real users look at what they typed before clicking generate,
+    # especially after a multi-second typing session.
+    page.wait_for_timeout(random.randint(1_200, 2_800))
 
     # --- 5. Confirm arrow is enabled and click ---
     arrow = _locate_generate_arrow(page)
@@ -2611,6 +2676,15 @@ def perform_recorded_video_flow(
             "Animate menuitem did not appear after opening overflow menu."
         ) from exc
     logger.info("Animate menuitem visible")
+
+    # v0.6.19-alpha — "read the menu" pause before clicking
+    # Animate. The overflow menu has 6 items (Animate / Add to
+    # prompt / Download / Rename / Set project cover / Move to
+    # trash). No human opens that menu and clicks the top item
+    # within 100ms — they read down the list. 1.5-3.5s here
+    # mimics that scan-and-pick behaviour.
+    page.wait_for_timeout(random.randint(1_500, 3_500))
+
     if _click_with_fallback(page, animate, "Animate", logger) is None:
         raise RecordedFlowError("Animate click failed across all methods.")
 
@@ -2644,7 +2718,7 @@ def perform_recorded_video_flow(
             exc,
         )
 
-    # --- 5. Fill the video prompt -----------------------------------------
+    # --- 5. Type the video prompt -----------------------------------------
     prompt_input = _locate_prompt_input(page)
     try:
         prompt_input.wait_for(state="visible", timeout=selector_timeout_ms)
@@ -2652,14 +2726,33 @@ def perform_recorded_video_flow(
         raise RecordedFlowError(
             "Video composer prompt input did not appear after Animate."
         ) from exc
-    prompt_input.click()
-    prompt_input.fill(video_prompt)
+    # v0.6.19-alpha — type char-by-char with jittered cadence
+    # instead of fill()'ing the whole string. Real keystroke
+    # events with realistic timing vs a single instantaneous
+    # text-insert (the latter is a strong reCAPTCHA bot signal).
+    _human_type(page, prompt_input, video_prompt, log=logger)
     if not _is_prompt_text_present(prompt_input, video_prompt):
-        raise RecordedFlowError(
-            "Video prompt not visible in composer after fill(); refusing "
-            "to click generate."
+        # Fall back to fill() on retry — better than failing the
+        # tile because the typing dropped a char.
+        logger.warning(
+            "Video prompt not visible after _human_type; falling back to fill()."
         )
+        prompt_input.click()
+        prompt_input.fill(video_prompt)
+        if not _is_prompt_text_present(prompt_input, video_prompt):
+            raise RecordedFlowError(
+                "Video prompt not visible in composer after _human_type + "
+                "fill() retry; refusing to click generate."
+            )
     logger.info("Video prompt inserted")
+
+    # v0.6.19-alpha — "re-read the prompt" pause before submit.
+    # On video specifically this is even more important than
+    # image: video submits trip Flow's risk engine more easily,
+    # and the alternative is a snap-click from "prompt landed in
+    # composer" to "generate arrow clicked" — a strong
+    # automation tell.
+    page.wait_for_timeout(random.randint(1_500, 3_500))
 
     # --- 6. Click the generate arrow --------------------------------------
     arrow = _locate_generate_arrow(page)
