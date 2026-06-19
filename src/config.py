@@ -147,9 +147,14 @@ def _automation_mode_defaults(mode: str) -> dict[str, int]:
             video_tile_settle_ms=700,
             video_after_hover_ms=500,
             video_after_menu_click_ms=400,
-            # +2s across all modes per end-user feedback — give Flow
-            # a longer breather between video submits.
-            video_between_products_ms=10_000,   # 10s base + jitter
+            # v0.6.17-alpha — bumped 10s → 15s. Combined with the
+            # new _between_tiles_delay() jitter (0-25s) and rest
+            # cadence (45-90s every 5 tiles), family_plan video
+            # submits now space out at 15-40s mean ~27s with
+            # multi-minute pauses. Targets the
+            # PUBLIC_ERROR_UNUSUAL_ACTIVITY signals end-user has
+            # been hitting on video gen specifically.
+            video_between_products_ms=15_000,
             video_retry_count=3,
         )
     if mode == AUTOMATION_MODE_BALANCED:

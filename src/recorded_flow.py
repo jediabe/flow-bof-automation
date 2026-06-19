@@ -2494,6 +2494,16 @@ def perform_recorded_video_flow(
     if not video_prompt:
         raise RecordedFlowError("video_prompt is empty; refusing to submit")
 
+    # v0.6.17-alpha — small jitter on every per-action settle. The
+    # configured tile_settle / after_hover / after_menu_click values
+    # are themselves a behavioral fingerprint if they fire as
+    # exact constants. Add 0-30% on top so the per-tile cadence
+    # varies with each tile.
+    def _j(base_ms: int) -> int:
+        if base_ms <= 0:
+            return 0
+        return base_ms + random.randint(0, max(60, base_ms // 3))
+
     # Make sure any lingering menu from a previous iteration is gone.
     try:
         page.keyboard.press("Escape")
@@ -2513,8 +2523,8 @@ def perform_recorded_video_flow(
 
     # --- 2. Center the tile in the viewport --------------------------------
     _scroll_tile_to_center(page, tile, logger)
-    page.wait_for_timeout(tile_settle_ms)
-    logger.info("Tile scrolled to center (settle=%dms)", tile_settle_ms)
+    page.wait_for_timeout(_j(tile_settle_ms))
+    logger.info("Tile scrolled to center (settle=%dms+jitter)", tile_settle_ms)
 
     # --- 3. Open the overflow menu, with retry --------------------------------
     overflow_clicked_method: str | None = None
@@ -2526,11 +2536,11 @@ def perform_recorded_video_flow(
         # the overflow button after every hover.
         try:
             _scroll_tile_to_center(page, tile, logger)
-            page.wait_for_timeout(tile_settle_ms)
+            page.wait_for_timeout(_j(tile_settle_ms))
             tile.hover()
-            page.wait_for_timeout(after_hover_ms)
+            page.wait_for_timeout(_j(after_hover_ms))
             logger.info(
-                "Tile hovered (attempt %d/%d, after_hover=%dms)",
+                "Tile hovered (attempt %d/%d, after_hover=%dms+jitter)",
                 attempt, max_overflow_attempts, after_hover_ms,
             )
 
@@ -2583,10 +2593,10 @@ def perform_recorded_video_flow(
     if not _wait_for_overflow_menu(page, timeout_ms=max(after_menu_click_ms, 2000)):
         logger.warning(
             "Overflow menu container did not appear after click; falling "
-            "back to a static %dms sleep and trying the Animate locator anyway.",
+            "back to a jittered %dms sleep and trying the Animate locator anyway.",
             after_menu_click_ms,
         )
-        page.wait_for_timeout(after_menu_click_ms)
+        page.wait_for_timeout(_j(after_menu_click_ms))
     else:
         logger.info("Overflow menu visible")
 

@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.16-alpha"
+APP_VERSION = "0.6.17-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +318,60 @@ def _between_products_delay(
             page.wait_for_timeout(rest_ms)
         return
     # Existing behaviour for balanced / fast.
+    page.wait_for_timeout(base_ms + random.randint(0, 2000))
+
+
+# v0.6.17-alpha — sibling helper for the video-gen loop. The video
+# loop was using a flat `page.wait_for_timeout(settings.video_
+# between_products_ms)` between tiles, which gives reCAPTCHA
+# Enterprise's behavioral scorer a perfectly monotonic submit
+# cadence (huge tell). Mirrors the image-gen helper:
+#
+#   - family_plan: longer base, larger jitter window, periodic
+#     rest. Targets "focused human clicking through a queue."
+#   - balanced / fast: smaller jitter, no rest. Operators who
+#     pick these modes have explicitly traded safety for speed.
+#
+# Video batches are typically smaller than image batches (3-10
+# tiles vs 30-50 products), so the rest cadence fires every 5
+# tiles (vs every 15 for images) to make sure most batches see
+# at least one rest. Tuning may need to drift as Flow's risk
+# scoring evolves.
+def _between_tiles_delay(
+    page, settings, n_completed: int, logger,
+) -> None:
+    """Inter-tile delay for the video-gen loop. Called after every
+    tile (success + failure paths) to humanise the submit cadence.
+    """
+    from .config import AUTOMATION_MODE_FAMILY_PLAN
+    base_ms = settings.video_between_products_ms
+    if settings.automation_mode == AUTOMATION_MODE_FAMILY_PLAN:
+        # 10s base (from config) + 0-25s jitter. Range 10-35s,
+        # mean ~22s. Slightly slower than image gen because video
+        # submits hit Flow harder (each one queues a multi-minute
+        # render server-side) — Flow's risk scoring may weight
+        # them differently.
+        jitter_ms = random.randint(0, 25_000)
+        total_ms = base_ms + jitter_ms
+        logger.info(
+            "Family-plan inter-tile delay: %.1fs (base=%dms + jitter=%dms)",
+            total_ms / 1000, base_ms, jitter_ms,
+        )
+        page.wait_for_timeout(total_ms)
+        # Periodic rest every 5 tiles — videos are slow-paced
+        # already so this only fires on the medium / large
+        # batches. The image-gen rest is every 15 items because
+        # those batches are larger and the per-item time is
+        # smaller; videos see this at 5.
+        if n_completed > 0 and n_completed % 5 == 0:
+            rest_ms = random.randint(45_000, 90_000)
+            logger.info(
+                "Family-plan periodic rest (video): %.0fs after %d tiles",
+                rest_ms / 1000, n_completed,
+            )
+            page.wait_for_timeout(rest_ms)
+        return
+    # balanced / fast — small jitter on top of the configured base.
     page.wait_for_timeout(base_ms + random.randint(0, 2000))
 
 
@@ -1159,7 +1213,7 @@ def _handle_generate_flow_videos_from_favorites(
                                          "message": str(exc)},
                         },
                     )
-                    page.wait_for_timeout(settings.video_between_products_ms)
+                    _between_tiles_delay(page, settings, n, logger)
                     continue
                 except FlowAutomationError as exc:
                     failed += 1
@@ -1186,7 +1240,7 @@ def _handle_generate_flow_videos_from_favorites(
                                          "message": str(exc)},
                         },
                     )
-                    page.wait_for_timeout(settings.video_between_products_ms)
+                    _between_tiles_delay(page, settings, n, logger)
                     continue
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
@@ -1214,7 +1268,7 @@ def _handle_generate_flow_videos_from_favorites(
                                          "message": f"{type(exc).__name__}: {exc}"},
                         },
                     )
-                    page.wait_for_timeout(settings.video_between_products_ms)
+                    _between_tiles_delay(page, settings, n, logger)
                     continue
 
                 # Success path.
@@ -1245,7 +1299,7 @@ def _handle_generate_flow_videos_from_favorites(
                         "edit_id":  tile.edit_id,
                     },
                 )
-                page.wait_for_timeout(settings.video_between_products_ms)
+                _between_tiles_delay(page, settings, n, logger)
 
     except FlowAutomationError as exc:
         msg = str(exc)
