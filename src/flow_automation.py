@@ -18,6 +18,7 @@ Selectors live in config.py — do not embed them here.
 from __future__ import annotations
 
 import logging
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -74,7 +75,29 @@ class FlowSession:
 @contextmanager
 def open_flow_browser(settings: Settings, logger: logging.Logger) -> Iterator[FlowSession]:
     """Yield a FlowSession appropriate for the configured BROWSER_MODE."""
-    with sync_playwright() as pw:
+    # v0.6.15-alpha — Patchright (sync_playwright underneath) spawns
+    # a bundled Node.js driver subprocess on enter. If the driver
+    # binary isn't on disk where the wrapper expects it (wheel
+    # installed but post-install browser bootstrap skipped, OR a
+    # packaged exe that's missing patchright/driver/* data files),
+    # __enter__ throws a bare FileNotFoundError([WinError 2]) with
+    # no path. Translate that to a clear remediation message before
+    # it leaks to the job dispatcher.
+    pw_ctx = sync_playwright()
+    try:
+        pw = pw_ctx.__enter__()
+    except FileNotFoundError as exc:
+        raise FlowAutomationError(
+            "Patchright's bundled driver binary is missing on disk. "
+            "On a source install, run `python -m patchright install chromium` "
+            "(downloads the patched Chromium AND ensures the Node driver "
+            "is in place). On a packaged dmg/exe this indicates the build "
+            "skipped Patchright's data files — rebuild from a commit that "
+            "includes collect_data_files('patchright') in FlowBOFRunner.spec. "
+            f"Original error: {exc}"
+        ) from exc
+
+    try:
         if settings.browser_mode == BROWSER_MODE_REMOTE_DEBUGGING:
             session = _attach_remote_chrome(pw, settings, logger)
             try:
@@ -97,6 +120,11 @@ def open_flow_browser(settings: Settings, logger: logging.Logger) -> Iterator[Fl
                     logger.exception("Error closing persistent context")
         else:
             raise FlowAutomationError(f"Unknown BROWSER_MODE: {settings.browser_mode!r}")
+    finally:
+        # Mirror `with sync_playwright() as pw:` exit semantics — the
+        # context manager's __exit__ stops the driver subprocess.
+        # Pass exc info so the inner stop() can decide to be lenient.
+        pw_ctx.__exit__(*sys.exc_info())
 
 
 def _attach_remote_chrome(

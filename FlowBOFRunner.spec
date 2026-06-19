@@ -43,12 +43,30 @@
 
 import sys
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 
 block_cipher = None
+
+# v0.6.15-alpha — Patchright bundles its Node.js driver under
+# site-packages/patchright/driver/ as raw binary data, not a Python
+# module. PyInstaller's static scan doesn't pick those up — they're
+# data files, not imports. Without them, sync_playwright().start()
+# raises FileNotFoundError because the driver binary isn't on disk
+# at runtime. Same applies to patchright's bundled package.json and
+# its node_modules tree (loaded by the driver process).
+#
+# pyautogui's pyscreeze / mouseinfo subdeps similarly ship platform
+# binaries (pymsgbox dialog assets, mouseinfo's GUI .png icons).
+# Bundling them keeps human_mouse.py's fallback path crash-free.
+runtime_datas = (
+    collect_data_files("patchright")
+    + collect_data_files("pyautogui")
+    + collect_data_files("pyscreeze")
+    + collect_data_files("mouseinfo")
+)
 
 # Force-include the src.runner_app modules + everything the existing
 # automation code uses lazily. PyInstaller's static analysis catches
@@ -105,7 +123,7 @@ a = Analysis(
     ["runner_app.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
+    datas=runtime_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
