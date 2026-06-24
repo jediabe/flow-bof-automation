@@ -69,7 +69,7 @@ PROTOCOL_VERSION = "0.1"
 # Bumped manually when the agent's wire behavior changes. Surfaced in
 # health_check results so the dashboard can flag agents that need an
 # update.
-APP_VERSION = "0.6.19-alpha"
+APP_VERSION = "0.6.20-alpha"
 
 
 # ---------------------------------------------------------------------------

@@ -2108,31 +2108,35 @@ def perform_recorded_flow(
             "popover may not have dismissed."
         ) from exc
     prompt_input = _locate_prompt_input(page)
-    # v0.6.19-alpha — type instead of fill so reCAPTCHA sees
-    # actual keystroke events with realistic timing instead of a
-    # single instant-text-insert (huge bot tell).
-    _human_type(page, prompt_input, prompt, log=logger)
+    # v0.6.20-alpha — reverted from _human_type back to fill().
+    # End-user reported unusual_activity errors went UP after
+    # v0.6.19 introduced per-character typing. Hypothesis: the
+    # elevated CDP message volume from N keypresses + the long
+    # dwell on the prompt input is itself a stronger bot tell
+    # than a paste-equivalent fill(). Real Flow users typically
+    # paste their crafted prompts from notes; instant insert is
+    # the more common human pattern there.
+    prompt_input.click()
+    prompt_input.fill(prompt)
     if not _is_prompt_text_present(prompt_input, prompt):
-        # Retry once — sometimes the contenteditable rejects keys
-        # on a recently re-rendered element. Fall back to fill on
-        # the retry so we don't lose the prompt.
+        # Retry once — a stale fill on a recently re-rendered
+        # contenteditable can drop the text on the first try.
         logger.warning(
-            "Prompt text not visible after _human_type; re-locating + "
-            "falling back to fill() for the retry."
+            "Prompt text not visible after first fill; re-locating + retrying."
         )
         prompt_input = _locate_prompt_input(page)
         prompt_input.click()
         prompt_input.fill(prompt)
         if not _is_prompt_text_present(prompt_input, prompt):
             raise RecordedFlowError(
-                "Prompt text not visible in composer after _human_type + "
-                "fill() retry; refusing to log 'Prompt inserted'."
+                "Prompt text not visible in composer after fill() (retry "
+                "exhausted); refusing to log 'Prompt inserted'."
             )
     logger.info("Prompt inserted")
 
-    # v0.6.19-alpha — "re-read the prompt" pause before submit.
-    # Real users look at what they typed before clicking generate,
-    # especially after a multi-second typing session.
+    # "Re-read the prompt" pause before submit. Kept from v0.6.19 —
+    # this is just a wait, not a CDP-traffic generator, so it
+    # doesn't have the downside the per-char typing had.
     page.wait_for_timeout(random.randint(1_200, 2_800))
 
     # --- 5. Confirm arrow is enabled and click ---
@@ -2718,7 +2722,7 @@ def perform_recorded_video_flow(
             exc,
         )
 
-    # --- 5. Type the video prompt -----------------------------------------
+    # --- 5. Fill the video prompt -----------------------------------------
     prompt_input = _locate_prompt_input(page)
     try:
         prompt_input.wait_for(state="visible", timeout=selector_timeout_ms)
@@ -2726,23 +2730,28 @@ def perform_recorded_video_flow(
         raise RecordedFlowError(
             "Video composer prompt input did not appear after Animate."
         ) from exc
-    # v0.6.19-alpha — type char-by-char with jittered cadence
-    # instead of fill()'ing the whole string. Real keystroke
-    # events with realistic timing vs a single instantaneous
-    # text-insert (the latter is a strong reCAPTCHA bot signal).
-    _human_type(page, prompt_input, video_prompt, log=logger)
+    # v0.6.20-alpha — reverted from _human_type back to fill().
+    # End-user reported v0.6.19's per-character typing INCREASED
+    # unusual_activity hits on video gen specifically. Going back
+    # to instant paste-equivalent (single CDP call). Other
+    # improvements from v0.6.19 (read-the-menu pause, re-read
+    # prompt pause) stay because they're just waits with no
+    # extra CDP traffic.
+    prompt_input.click()
+    prompt_input.fill(video_prompt)
     if not _is_prompt_text_present(prompt_input, video_prompt):
-        # Fall back to fill() on retry — better than failing the
-        # tile because the typing dropped a char.
+        # Retry once if the contenteditable swallowed the first
+        # fill (rare race after a recent re-render).
         logger.warning(
-            "Video prompt not visible after _human_type; falling back to fill()."
+            "Video prompt not visible after first fill; retrying."
         )
+        prompt_input = _locate_prompt_input(page)
         prompt_input.click()
         prompt_input.fill(video_prompt)
         if not _is_prompt_text_present(prompt_input, video_prompt):
             raise RecordedFlowError(
-                "Video prompt not visible in composer after _human_type + "
-                "fill() retry; refusing to click generate."
+                "Video prompt not visible in composer after fill() (retry "
+                "exhausted); refusing to click generate."
             )
     logger.info("Video prompt inserted")
 
