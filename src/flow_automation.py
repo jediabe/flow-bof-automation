@@ -231,6 +231,31 @@ _STEALTH_INIT_JS = r"""
       });
     }
   } catch (_e) { /* swallow — better to fail open than crash */ }
+
+  // v0.6.21-alpha — remove Playwright's marker globals from window.
+  //
+  // When the runner calls context.add_init_script(...), Playwright
+  // tags window with __pwInitScripts and __playwright__binding__
+  // so it can manage init-script state across navigations.
+  // Castle.io and DataDome have both published that reCAPTCHA
+  // Enterprise's behavioral scorer can grep for these as a
+  // Playwright signature. This is the only thing the failed
+  // Patchright switch was actually buying us (Patchright moves
+  // init scripts to isolated worlds so these markers never land
+  // on the page's main world). We can do a surgical version
+  // here: register the cleanup as an init script that runs in
+  // the same world AFTER Playwright places the marker.
+  //
+  // This script runs at every navigation thanks to add_init_script,
+  // so even pages that load after the cleanup ran once still get
+  // re-cleaned on their own load. Wrapped in try/catch so a
+  // future Playwright rename doesn't crash the page.
+  try { delete window.__pwInitScripts; } catch (_e) {}
+  try { delete window.__playwright__binding__; } catch (_e) {}
+  // Defensive: also blank out by reassigning if delete didn't take
+  // (some hosting setups make these properties non-configurable).
+  try { window.__pwInitScripts = undefined; } catch (_e) {}
+  try { window.__playwright__binding__ = undefined; } catch (_e) {}
 })();
 """
 
